@@ -20,17 +20,30 @@ Guarantees:
 from __future__ import annotations
 
 import json
-import logging
 import re
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
+import structlog
+
+from bot.services.confidence import (
+    ConfidenceMetrics,
+    compute_confidence,
+    should_override_decision,
+)
 from bot.services.knowledge_base import get_knowledge_base
 from bot.services.llm_service import _call_llm
+from bot.services.redis_store import (
+    dict_to_session,
+    get_session_store,
+    session_to_dict,
+)
+from bot.services.sentiment import FrustrationTracker, detect_frustration
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 MAX_QUESTIONS = 3
 MAX_TURNS = 10
@@ -69,6 +82,7 @@ class Session:
     closed: bool = False
     last_bot_question: str = ""
     in_follow_up: bool = False
+    frustration_tracker: FrustrationTracker = field(default_factory=FrustrationTracker)
 
     def add_user(self, text: str) -> None:
         self.turns.append({"role": "user", "content": text})
@@ -103,20 +117,33 @@ class Session:
         return "\n".join(parts)
 
 
-_sessions: dict[str, Session] = {}
-
-
-def get_or_create_session(session_id: str | None) -> Session:
-    if session_id and session_id in _sessions:
-        return _sessions[session_id]
+async def get_or_create_session(session_id: str | None) -> Session:
+    """Retrieve an existing session from Redis (or fallback) or create a new one."""
+    store = get_session_store()
     sid = session_id or str(uuid.uuid4())
-    s = Session(id=sid)
-    _sessions[sid] = s
-    return s
+
+    if session_id:
+        data = await store.get(session_id)
+        if data is not None:
+            session = dict_to_session(data)
+            return session  # type: ignore[return-value]
+
+    session = Session(id=sid)
+    await store.save(sid, session_to_dict(session))
+    logger.info("session_created", session_id=sid, store_mode="redis" if store.is_redis_connected else "memory")
+    return session
 
 
-def reset_session(session_id: str) -> None:
-    _sessions.pop(session_id, None)
+async def save_session(session: Session) -> None:
+    """Persist the current session state to the store."""
+    store = get_session_store()
+    await store.save(session.id, session_to_dict(session))
+
+
+async def reset_session(session_id: str) -> None:
+    """Remove a session from the store."""
+    store = get_session_store()
+    await store.delete(session_id)
 
 
 def _normalize(text: str) -> str:
@@ -255,6 +282,8 @@ class TriageStep:
     sources: list[str]
     urgency: str | None = None
     error_summary: str | None = None
+    confidence: ConfidenceMetrics | None = None
+    frustration_score: float = 0.0
 
 
 def _parse_llm_json(raw: str) -> dict:
@@ -297,7 +326,7 @@ async def _call_forced_decide(session: Session, kb_context: str) -> dict:
             parsed["decision"] = "escalate"
         return parsed
     except Exception as exc:
-        logger.warning("Forced-decide parse failed: %s", exc)
+        logger.warning("forced_decide_parse_failed", error=str(exc))
         return {
             "decision": "explain",
             "explanation": (
@@ -430,6 +459,7 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
         )
         session.closed = True
         session.add_bot(msg)
+        await save_session(session)
         return TriageStep(
             decision="escalate",
             message=msg,
@@ -444,6 +474,7 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
     if is_only_greeting:
         session.add_bot(WELCOME_MESSAGE)
         session.last_bot_question = WELCOME_MESSAGE
+        await save_session(session)
         return TriageStep(
             decision="ask",
             message=WELCOME_MESSAGE,
@@ -458,6 +489,7 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             "Pode descrever com mais detalhes o que voce precisa?"
         )
         session.add_bot(msg)
+        await save_session(session)
         return TriageStep(
             decision="ask",
             message=msg,
@@ -465,7 +497,38 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             sources=[],
         )
 
-    # 3) Language detection.
+    # 3) Frustration detection — score the message and track the trend.
+    frustration_score, frustration_escalate = detect_frustration(
+        user_message, session.frustration_tracker
+    )
+
+    if frustration_escalate and not session.closed:
+        empathy_prefix = (
+            "Entendo sua frustracao e lamento pela experiencia. "
+            "Vou encaminhar seu caso para um atendente agora mesmo."
+        )
+        error_summary = _build_fallback_summary(session, user_message)
+        session.closed = True
+        session.add_bot(f"[ESCALACAO POR FRUSTRACAO] {error_summary}")
+        await save_session(session)
+        logger.info(
+            "frustration_escalation",
+            session_id=session.id,
+            frustration_score=frustration_score,
+            trend_avg=session.frustration_tracker.trend_average,
+            peak=session.frustration_tracker.peak_score,
+        )
+        return TriageStep(
+            decision="escalate",
+            message=f"{empathy_prefix}\n\n{error_summary}",
+            reason="escalacao automatica por frustracao elevada",
+            sources=[],
+            urgency="urgente",
+            error_summary=error_summary,
+            frustration_score=frustration_score,
+        )
+
+    # 4) Language detection.
     lang = _detect_language(user_message)
     language_instruction = (
         "Responda em INGLES. The user writes in English, reply in English."
@@ -478,6 +541,9 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
     kb_context = kb.format_context(query, max_results=5) or "(sem trechos relevantes)"
     search = kb.search(query, max_results=5)
     sources = list(dict.fromkeys(s["source"] for s in search))
+
+    # Compute confidence metrics from RAG results.
+    confidence = compute_confidence(search_results=search, query=query, llm_parse_ok=True)
 
     at_cap = session.questions_asked >= MAX_QUESTIONS
 
@@ -502,7 +568,8 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             raw = await _call_llm(system_prompt, "Responda em JSON.", max_tokens=800)
             parsed = _parse_llm_json(raw)
         except Exception as exc:
-            logger.warning("Triage LLM parse failed: %s", exc)
+            logger.warning("triage_llm_parse_failed", error=str(exc))
+            confidence = compute_confidence(search_results=search, query=query, llm_parse_ok=False)
             parsed = {
                 "decision": "explain",
                 "explanation": (
@@ -516,6 +583,25 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
 
     decision: Decision = parsed.get("decision", "ask")
 
+    # Apply confidence-based override.
+    override = should_override_decision(
+        current_decision=decision,
+        metrics=confidence,
+        questions_asked=session.questions_asked,
+        max_questions=MAX_QUESTIONS,
+    )
+    if override is not None:
+        decision = override
+
+    logger.info(
+        "triage_decision",
+        session_id=session.id,
+        decision=decision,
+        frustration_score=frustration_score,
+        frustration_trend=session.frustration_tracker.trend_average,
+        **confidence.as_dict(),
+    )
+
     # 3) Duplicate-question guard: if LLM wants to ask the same thing again,
     # force a decision instead.
     if decision == "ask":
@@ -523,7 +609,7 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
         if session.last_bot_question and _similar_question(
             new_q, session.last_bot_question
         ):
-            logger.info("Duplicate question detected — forcing decision")
+            logger.info("duplicate_question_detected", session_id=session.id)
             parsed = await _call_forced_decide(session, kb_context)
             decision = parsed.get("decision", "explain")
 
@@ -539,11 +625,14 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
         session.questions_asked += 1
         session.add_bot(question)
         session.last_bot_question = question
+        await save_session(session)
         return TriageStep(
             decision="ask",
             message=question,
             reason=parsed.get("reason") or "",
             sources=[],
+            confidence=confidence,
+            frustration_score=frustration_score,
         )
 
     if decision == "explain":
@@ -553,14 +642,20 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
                 "Com base na documentacao, este parece ser um ajuste de uso. "
                 "Verifique os passos no material de referencia abaixo."
             )
+        # Prepend empathy when moderate frustration is detected.
+        if frustration_score >= 0.4:
+            explanation = f"Entendo que isso deve ser frustrante. Vou te ajudar.\n\n{explanation}"
         session.questions_asked = 0
         session.in_follow_up = True
         session.add_bot(explanation)
+        await save_session(session)
         return TriageStep(
             decision="explain",
             message=explanation,
             reason=parsed.get("reason") or "",
             sources=sources,
+            confidence=confidence,
+            frustration_score=frustration_score,
         )
 
     # escalate
@@ -568,8 +663,12 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
     if len(error_summary) < 10:
         error_summary = _build_fallback_summary(session, user_message)
     urgency = (parsed.get("urgency") or "urgente").strip().lower() or "urgente"
+    # Boost urgency when frustration is high.
+    if frustration_score >= 0.6:
+        urgency = "urgente"
     session.closed = True
     session.add_bot(f"[ESCALACAO] {error_summary}")
+    await save_session(session)
     return TriageStep(
         decision="escalate",
         message=error_summary,
@@ -577,4 +676,6 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
         sources=sources,
         urgency=urgency,
         error_summary=error_summary,
+        confidence=confidence,
+        frustration_score=frustration_score,
     )

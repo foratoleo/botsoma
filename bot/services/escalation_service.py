@@ -1,7 +1,7 @@
-import logging
 import time
 
 import httpx
+import structlog
 
 from bot.config import (
     MICROSOFT_APP_ID,
@@ -10,7 +10,7 @@ from bot.config import (
     TOKEN_EXPIRY_BUFFER_S,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _cached_token: str | None = None
 _token_expiry: float = 0.0
@@ -42,7 +42,7 @@ async def _get_access_token() -> str:
     _cached_token = body["access_token"]
     _token_expiry = time.time() + (body.get("expires_in", 3600) - TOKEN_EXPIRY_BUFFER_S)
 
-    logger.info("Access token acquired, expires in %ds", body.get("expires_in", 3600))
+    logger.info("access_token_acquired", expires_in_s=body.get("expires_in", 3600))
     return _cached_token
 
 
@@ -73,11 +73,13 @@ async def send_proactive_message(
 
     if not resp.is_success:
         logger.error(
-            "Proactive message failed %s: %s", resp.status_code, resp.text[:300]
+            "proactive_message_failed",
+            status_code=resp.status_code,
+            conversation_id=conversation_id[:20],
         )
         return False
 
-    logger.info("Proactive message sent to conversation %s", conversation_id[:20])
+    logger.info("proactive_message_sent", conversation_id=conversation_id[:20])
     return True
 
 
@@ -109,14 +111,16 @@ async def create_or_continue_conversation(
 
     if not resp.is_success:
         logger.error(
-            "Create conversation failed %s: %s", resp.status_code, resp.text[:300]
+            "create_conversation_failed",
+            status_code=resp.status_code,
+            user_id=user_id[:20],
         )
         return False
 
     body = resp.json()
     conversation_id = body.get("id")
     if not conversation_id:
-        logger.error("No conversation ID in response")
+        logger.error("create_conversation_no_id", user_id=user_id[:20])
         return False
 
     return await send_proactive_message(service_url, conversation_id, text)

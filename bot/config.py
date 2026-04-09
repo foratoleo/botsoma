@@ -20,6 +20,20 @@ BOT_NAME = os.getenv("BOT_NAME", "Suporte IA")
 
 KNOWLEDGE_BASE_DIR = Path(os.getenv("KNOWLEDGE_BASE_DIR", "docs/knowledge"))
 
+# Embedding model settings
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
+FAISS_INDEX_PATH = Path(os.getenv("FAISS_INDEX_PATH", ".cache/faiss_index"))
+EMBEDDING_TOP_K = int(os.getenv("EMBEDDING_TOP_K", "5"))
+
+# Hybrid search settings
+HYBRID_SEARCH_ENABLED = os.getenv("HYBRID_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+HYBRID_RRF_K = int(os.getenv("HYBRID_RRF_K", "60"))
+HYBRID_SPARSE_TOP_K = int(os.getenv("HYBRID_SPARSE_TOP_K", "20"))
+
+# Redis session store
+REDIS_URL = os.getenv("REDIS_URL", "")
+
 SUPPORT_USER_IDS = [
     uid.strip() for uid in os.getenv("SUPPORT_USER_IDS", "").split(",") if uid.strip()
 ]
