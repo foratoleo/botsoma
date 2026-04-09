@@ -170,9 +170,11 @@ def session_closed() -> None:
 async def metrics_handler(request: web.Request) -> web.Response:
     """Expose Prometheus metrics at ``/metrics``."""
     body = generate_latest(REGISTRY)
+    # aiohttp requires content_type without charset param
+    ct = CONTENT_TYPE_LATEST.split(";")[0]
     return web.Response(
         body=body,
-        content_type=CONTENT_TYPE_LATEST,
+        content_type=ct,
     )
 
 
