@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Botsoma - Triagem Deterministica</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #f5f5f5;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .header {
+        background: #234b59;
+        color: white;
+        padding: 16px 24px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .header h1 { font-size: 18px; font-weight: 600; }
+      .header .badge {
+        font-size: 11px;
+        background: rgba(255, 255, 255, 0.2);
+        padding: 2px 8px;
+        border-radius: 10px;
+      }
+      .header .progress {
+        margin-left: auto;
+        font-size: 12px;
+        opacity: 0.9;
+      }
+      .header button.reset {
+        margin-left: 12px;
+        background: rgba(255,255,255,0.15);
+        color: white;
+        border: 1px solid rgba(255,255,255,0.3);
+        border-radius: 14px;
+        padding: 4px 12px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .header button.reset:hover { background: rgba(255,255,255,0.25); }
+
+      .chat-container {
+        flex: 1;
+        overflow-y: auto;
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .message {
+        max-width: 75%;
+        padding: 12px 16px;
+        border-radius: 12px;
+        line-height: 1.5;
+        font-size: 14px;
+        word-wrap: break-word;
+      }
+      .message.user {
+        align-self: flex-end;
+        background: #234b59;
+        color: white;
+        border-bottom-right-radius: 4px;
+      }
+      .message.bot {
+        align-self: flex-start;
+        background: white;
+        color: #333;
+        border: 1px solid #e0e0e0;
+        border-bottom-left-radius: 4px;
+      }
+      .message.bot.ask { border-left: 4px solid #2980b9; }
+      .message.bot.explain { border-left: 4px solid #27ae60; }
+      .message.bot.escalate { border-left: 4px solid #e74c3c; background: #fff5f4; }
+
+      .decision-tag {
+        display: inline-block;
+        font-size: 10px;
+        padding: 3px 8px;
+        border-radius: 4px;
+        margin-bottom: 8px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+      }
+      .tag-ask      { background: #e8f6fd; color: #2980b9; }
+      .tag-explain  { background: #e8f8ee; color: #1e8449; }
+      .tag-escalate { background: #fde8e8; color: #c0392b; }
+
+      .handoff-card {
+        margin-top: 12px;
+        padding: 12px;
+        background: #fff;
+        border: 1px dashed #e74c3c;
+        border-radius: 8px;
+        font-size: 13px;
+      }
+      .handoff-card .who {
+        font-weight: 600;
+        color: #c0392b;
+        margin-bottom: 4px;
+      }
+      .handoff-card .urgency {
+        display: inline-block;
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 3px;
+        color: white;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        margin-left: 6px;
+      }
+      .handoff-card .urgency.urgency-urgente { background: #c0392b; }
+      .handoff-card .urgency.urgency-normal  { background: #e67e22; }
+      .handoff-card .urgency.urgency-baixa   { background: #2980b9; }
+
+      .sources {
+        font-size: 11px;
+        font-style: italic;
+        opacity: 0.7;
+        margin-top: 8px;
+        border-top: 1px solid rgba(0, 0, 0, 0.1);
+        padding-top: 6px;
+      }
+
+      .reason {
+        font-size: 10px;
+        opacity: 0.5;
+        margin-top: 6px;
+        font-style: italic;
+      }
+
+      .typing {
+        align-self: flex-start;
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 12px;
+        border-bottom-left-radius: 4px;
+        padding: 12px 16px;
+        font-size: 14px;
+        color: #999;
+        display: none;
+      }
+      .typing.visible { display: block; }
+      .typing span { animation: blink 1.4s infinite; }
+      .typing span:nth-child(2) { animation-delay: 0.2s; }
+      .typing span:nth-child(3) { animation-delay: 0.4s; }
+      @keyframes blink { 0%,60%,100% { opacity: 0.2; } 30% { opacity: 1; } }
+
+      .input-area {
+        padding: 16px 24px;
+        background: white;
+        border-top: 1px solid #e0e0e0;
+        display: flex;
+        gap: 12px;
+      }
+      .input-area input {
+        flex: 1;
+        padding: 12px 16px;
+        border: 1px solid #ddd;
+        border-radius: 24px;
+        font-size: 14px;
+        outline: none;
+      }
+      .input-area input:focus { border-color: #234b59; }
+      .input-area button {
+        padding: 12px 24px;
+        background: #234b59;
+        color: white;
+        border: none;
+        border-radius: 24px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .input-area button:hover { background: #1a3643; }
+      .input-area button:disabled { background: #ccc; cursor: not-allowed; }
+
+      .welcome {
+        text-align: center;
+        padding: 40px 20px;
+        color: #666;
+      }
+      .welcome h2 { font-size: 20px; color: #333; margin-bottom: 8px; }
+      .welcome p {
+        font-size: 14px;
+        max-width: 480px;
+        margin: 0 auto;
+        line-height: 1.6;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>Botsoma</h1>
+      <span class="badge">TRIAGEM DETERMINISTICA</span>
+      <span class="progress" id="progress">0 / 3 perguntas</span>
+      <button class="reset" onclick="resetConversation()">Nova conversa</button>
+    </div>
+
+    <div class="chat-container" id="chat">
+      <div class="welcome" id="welcome">
+        <h2>Bot de Suporte — DR AI Workforce</h2>
+        <p>
+          Descreva seu caso. Vou fazer ate 3 perguntas para decidir entre
+          <strong>explicar</strong> como usar a plataforma corretamente ou
+          <strong>escalar</strong> para um humano no Teams com urgencia.
+        </p>
+      </div>
+    </div>
+
+    <div class="typing" id="typing">
+      <span>.</span><span>.</span><span>.</span>
+    </div>
+
+    <div class="input-area">
+      <input
+        type="text"
+        id="userInput"
+        placeholder="Digite sua mensagem..."
+        autofocus
+      />
+      <button id="sendBtn" onclick="sendMessage()">Enviar</button>
+    </div>
+
+    <script>
+      const chat = document.getElementById("chat");
+      const input = document.getElementById("userInput");
+      const sendBtn = document.getElementById("sendBtn");
+      const typing = document.getElementById("typing");
+      const progress = document.getElementById("progress");
+      const welcome = document.getElementById("welcome");
+
+      let sessionId = null;
+      let closed = false;
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+
+      function escapeHtml(text) {
+        const div = document.createElement("div");
+        div.textContent = text == null ? "" : String(text);
+        return div.innerHTML;
+      }
+
+      function formatMarkdown(text) {
+        let html = escapeHtml(text);
+        html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+        html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+        html = html.replace(
+          /`(.+?)`/g,
+          '<code style="background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:12px">$1</code>',
+        );
+        html = html.replace(/\n/g, "<br>");
+        return html;
+      }
+
+      function addUserMessage(text) {
+        if (welcome) welcome.style.display = "none";
+        const div = document.createElement("div");
+        div.className = "message user";
+        div.innerHTML = formatMarkdown(text);
+        chat.appendChild(div);
+        chat.scrollTop = chat.scrollHeight;
+      }
+
+      function renderBot(data) {
+        if (welcome) welcome.style.display = "none";
+        const div = document.createElement("div");
+        div.className = `message bot ${data.decision}`;
+
+        let html = "";
+        const tag =
+          data.decision === "ask"      ? { cls: "tag-ask",      label: "PERGUNTA" } :
+          data.decision === "explain"  ? { cls: "tag-explain",  label: "EXPLICACAO" } :
+                                         { cls: "tag-escalate", label: "ESCALACAO " + (data.urgency || "urgente").toUpperCase() };
+
+        html += `<span class="decision-tag ${tag.cls}">${tag.label}</span><br>`;
+        html += formatMarkdown(data.reply);
+
+        if (data.decision === "escalate" && data.assignee) {
+          const a = data.assignee;
+          html += `<div class="handoff-card">`;
+          html += `<div class="who">${escapeHtml(a.name)} <span class="urgency urgency-${data.urgency || "urgente"}">${escapeHtml((data.urgency || "urgente").toUpperCase())}</span></div>`;
+          html += `<div>${escapeHtml(a.role)} &middot; Teams: <strong>${escapeHtml(a.teams_handle)}</strong></div>`;
+          if (data.handoff_notice) {
+            html += `<div style="margin-top:8px">${formatMarkdown(data.handoff_notice)}</div>`;
+          }
+          html += `</div>`;
+        }
+
+        if (data.sources && data.sources.length > 0) {
+          const unique = [...new Set(data.sources)];
+          html += `<div class="sources">Fonte: ${unique.map(escapeHtml).join(", ")}</div>`;
+        }
+        if (data.reason) {
+          html += `<div class="reason">decisao: ${escapeHtml(data.reason)}</div>`;
+        }
+
+        div.innerHTML = html;
+        chat.appendChild(div);
+        chat.scrollTop = chat.scrollHeight;
+      }
+
+      function updateProgress(asked, max) {
+        progress.textContent = `${asked} / ${max} perguntas`;
+      }
+
+      async function sendMessage() {
+        const text = input.value.trim();
+        if (!text) return;
+
+        input.value = "";
+        sendBtn.disabled = true;
+        input.disabled = true;
+
+        addUserMessage(text);
+        typing.classList.add("visible");
+
+        try {
+          const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session_id: sessionId,
+              message: text,
+              reset: closed, // auto-restart if previous session terminated
+            }),
+          });
+          const data = await res.json();
+
+          if (!res.ok) {
+            renderBot({
+              decision: "escalate",
+              reply: `Erro: ${data.detail || "Falha na comunicacao com o servidor"}`,
+              urgency: "urgente",
+            });
+          } else {
+            sessionId = data.session_id;
+            closed = !!data.closed;
+            updateProgress(data.questions_asked || 0, data.max_questions || 3);
+            renderBot(data);
+            if (closed) {
+              input.placeholder = "Conversa finalizada — clique em 'Nova conversa' para recomecar";
+              sendBtn.disabled = true;
+              input.disabled = true;
+            }
+          }
+        } catch (err) {
+          renderBot({
+            decision: "escalate",
+            reply: "Erro de conexao. Verifique se o servidor esta rodando.",
+            urgency: "urgente",
+          });
+        }
+
+        typing.classList.remove("visible");
+        if (!closed) {
+          sendBtn.disabled = false;
+          input.disabled = false;
+          input.focus();
+        }
+      }
+
+      function resetConversation() {
+        sessionId = null;
+        closed = false;
+        chat.innerHTML = "";
+        chat.appendChild(welcome);
+        welcome.style.display = "";
+        updateProgress(0, 3);
+        input.placeholder = "Digite sua mensagem...";
+        sendBtn.disabled = false;
+        input.disabled = false;
+        input.focus();
+      }
+    </script>
+  </body>
+</html>

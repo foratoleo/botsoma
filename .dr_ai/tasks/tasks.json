@@ -1,0 +1,12 @@
+{
+  "active_task": "modernize-support-agent",
+  "tasks": {
+    "modernize-support-agent": {
+      "created_at": "09/04/2026 09:44:49",
+      "executed_at": "09/04/2026 09:44:49",
+      "completed_at": null,
+      "status": "in_progress",
+      "type": "feat"
+    }
+  }
+}
