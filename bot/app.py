@@ -155,51 +155,32 @@ class TriageBot(ActivityHandler):
             )
 
             if step.decision == "ask":
-                ask_card = build_ask_card(
-                    question=step.message,
-                    suggested_replies=step.suggested_actions,
-                    session_id=session.id,
-                )
-                ask_activity = Activity(
-                    type=ActivityTypes.message,
-                    attachments=[card_to_attachment(ask_card)],
-                    text=step.message,
-                )
-                await turn_context.send_activity(ask_activity)
+                await turn_context.send_activity(step.message)
 
             elif step.decision == "explain":
-                explanation_card = build_explanation_card(
-                    explanation=step.message,
-                    sources=step.sources or None,
-                    session_id=session.id,
-                )
-                explain_activity = Activity(
-                    type=ActivityTypes.message,
-                    attachments=[card_to_attachment(explanation_card)],
-                    text=step.message,
-                )
-                await turn_context.send_activity(explain_activity)
+                reply = step.message
+                if step.sources:
+                    reply += f"\n\nFonte: {', '.join(step.sources)}"
+                await turn_context.send_activity(reply)
 
             elif step.decision == "escalate":
                 session_closed()
-
-                escalation_card = build_escalation_card(
-                    error_summary=step.error_summary or step.reason,
-                    urgency=step.urgency or "normal",
-                    session_id=session.id,
+                error_msg = step.error_summary or step.reason
+                await turn_context.send_activity(
+                    f"Parece que voce esta enfrentando um problema tecnico: {error_msg}\n\n"
+                    "Vou encaminhar para o time de suporte."
                 )
-                escalation_activity = Activity(
-                    type=ActivityTypes.message,
-                    attachments=[card_to_attachment(escalation_card)],
-                    text=ESCALATION_USER_MESSAGE,
-                )
-                await turn_context.send_activity(escalation_activity)
 
                 await self._send_escalation_notifications(
-                    turn_context, user_name, timestamp,
-                    conversation_id, step.urgency or "normal",
+                    turn_context,
+                    user_name,
+                    timestamp,
+                    conversation_id,
+                    step.urgency or "normal",
                     step.error_summary or step.reason,
-                    session, service_url, log,
+                    session,
+                    service_url,
+                    log,
                 )
 
         except Exception as exc:
@@ -242,8 +223,14 @@ class TriageBot(ActivityHandler):
                 log.info("card_action", verb=verb)
 
                 return await self._handle_card_action(
-                    turn_context, verb, data, conversation_id,
-                    user_name, service_url, timestamp, log,
+                    turn_context,
+                    verb,
+                    data,
+                    conversation_id,
+                    user_name,
+                    service_url,
+                    timestamp,
+                    log,
                 )
 
             # -- task/fetch: Open a Task Module dialog --
@@ -263,8 +250,13 @@ class TriageBot(ActivityHandler):
                 form_data = activity.value.get("data", {}) if activity.value else {}
                 log.info("task_submit", form_data=form_data)
                 return await self._handle_task_submit(
-                    turn_context, form_data, conversation_id,
-                    user_name, service_url, timestamp, log,
+                    turn_context,
+                    form_data,
+                    conversation_id,
+                    user_name,
+                    service_url,
+                    timestamp,
+                    log,
                 )
 
             # Unrecognized invoke — return OK to avoid errors in Teams.
@@ -356,9 +348,15 @@ class TriageBot(ActivityHandler):
             record_triage_decision("escalate", "normal")
 
             await self._send_escalation_notifications(
-                turn_context, user_name, timestamp,
-                conversation_id, "normal", error_summary,
-                session, service_url, log,
+                turn_context,
+                user_name,
+                timestamp,
+                conversation_id,
+                "normal",
+                error_summary,
+                session,
+                service_url,
+                log,
             )
 
             card = build_escalation_card(
@@ -469,10 +467,15 @@ class TriageBot(ActivityHandler):
         if step.decision == "escalate":
             session_closed()
             await self._send_escalation_notifications(
-                turn_context, user_name, timestamp,
-                conversation_id, urgency,
+                turn_context,
+                user_name,
+                timestamp,
+                conversation_id,
+                urgency,
                 step.error_summary or description,
-                session, service_url, log,
+                session,
+                service_url,
+                log,
             )
 
         response_body = build_task_module_submit_response(

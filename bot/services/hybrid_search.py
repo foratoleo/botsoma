@@ -112,9 +112,7 @@ class BM25Retriever:
 
         # Build (index, score) pairs, filter zero scores
         scored = [
-            (idx, float(score))
-            for idx, score in enumerate(scores)
-            if score > 0.0
+            (idx, float(score)) for idx, score in enumerate(scores) if score > 0.0
         ]
 
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -446,10 +444,22 @@ class HybridRetriever:
             reranking=self._reranker is not None,
         )
 
-        results = self._build_results(
-            fused[:fused_top_k], sections, method="hybrid"
-        )
+        results = self._build_results(fused[:fused_top_k], sections, method="hybrid")
         return self._apply_reranking(query, results)
+
+    def _apply_reranking(self, query: str, results: list[dict]) -> list[dict]:
+        """Apply cross-encoder reranking if available, otherwise pass through.
+
+        Args:
+            query: User search query.
+            results: Result dicts from retrieval stage.
+
+        Returns:
+            Reranked results (if reranker available) or original results.
+        """
+        if self._reranker is not None and self._reranker.is_available:
+            return self._reranker.rerank(query, results)
+        return results
 
     @staticmethod
     def _build_results(
