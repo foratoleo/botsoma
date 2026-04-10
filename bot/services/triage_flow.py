@@ -130,7 +130,11 @@ async def get_or_create_session(session_id: str | None) -> Session:
 
     session = Session(id=sid)
     await store.save(sid, session_to_dict(session))
-    logger.info("session_created", session_id=sid, store_mode="redis" if store.is_redis_connected else "memory")
+    logger.info(
+        "session_created",
+        session_id=sid,
+        store_mode="redis" if store.is_redis_connected else "memory",
+    )
     return session
 
 
@@ -284,6 +288,7 @@ class TriageStep:
     error_summary: str | None = None
     confidence: ConfidenceMetrics | None = None
     frustration_score: float = 0.0
+    suggested_actions: list[str] | None = None
 
 
 def _parse_llm_json(raw: str) -> dict:
@@ -543,7 +548,9 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
     sources = list(dict.fromkeys(s["source"] for s in search))
 
     # Compute confidence metrics from RAG results.
-    confidence = compute_confidence(search_results=search, query=query, llm_parse_ok=True)
+    confidence = compute_confidence(
+        search_results=search, query=query, llm_parse_ok=True
+    )
 
     at_cap = session.questions_asked >= MAX_QUESTIONS
 
@@ -569,7 +576,9 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             parsed = _parse_llm_json(raw)
         except Exception as exc:
             logger.warning("triage_llm_parse_failed", error=str(exc))
-            confidence = compute_confidence(search_results=search, query=query, llm_parse_ok=False)
+            confidence = compute_confidence(
+                search_results=search, query=query, llm_parse_ok=False
+            )
             parsed = {
                 "decision": "explain",
                 "explanation": (
@@ -644,7 +653,9 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             )
         # Prepend empathy when moderate frustration is detected.
         if frustration_score >= 0.4:
-            explanation = f"Entendo que isso deve ser frustrante. Vou te ajudar.\n\n{explanation}"
+            explanation = (
+                f"Entendo que isso deve ser frustrante. Vou te ajudar.\n\n{explanation}"
+            )
         session.questions_asked = 0
         session.in_follow_up = True
         session.add_bot(explanation)
