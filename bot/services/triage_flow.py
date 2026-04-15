@@ -20,22 +20,35 @@ Guarantees:
 from __future__ import annotations
 
 import json
-import logging
 import re
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
+import structlog
+
+from bot.services.confidence import (
+    ConfidenceMetrics,
+    compute_confidence,
+    should_override_decision,
+)
 from bot.services.knowledge_base import get_knowledge_base
 from bot.services.llm_service import _call_llm
+from bot.services.redis_store import (
+    dict_to_session,
+    get_session_store,
+    session_to_dict,
+)
+from bot.services.sentiment import FrustrationTracker, detect_frustration
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 MAX_QUESTIONS = 3
 MAX_TURNS = 10
 
-Decision = Literal["ask", "explain", "escalate"]
+Decision = Literal["ask", "explain", "escalate", "classify", "confirm_ticket"]
 
 GREETING_PATTERNS = {
     "ola",
@@ -69,6 +82,10 @@ class Session:
     closed: bool = False
     last_bot_question: str = ""
     in_follow_up: bool = False
+    frustration_tracker: FrustrationTracker = field(default_factory=FrustrationTracker)
+    pending_classification: str = ""
+    classification_confirmed: bool = False
+    channel: str = "teams"
 
     def add_user(self, text: str) -> None:
         self.turns.append({"role": "user", "content": text})
@@ -103,20 +120,37 @@ class Session:
         return "\n".join(parts)
 
 
-_sessions: dict[str, Session] = {}
-
-
-def get_or_create_session(session_id: str | None) -> Session:
-    if session_id and session_id in _sessions:
-        return _sessions[session_id]
+async def get_or_create_session(session_id: str | None) -> Session:
+    """Retrieve an existing session from Redis (or fallback) or create a new one."""
+    store = get_session_store()
     sid = session_id or str(uuid.uuid4())
-    s = Session(id=sid)
-    _sessions[sid] = s
-    return s
+
+    if session_id:
+        data = await store.get(session_id)
+        if data is not None:
+            session = dict_to_session(data)
+            return session  # type: ignore[return-value]
+
+    session = Session(id=sid)
+    await store.save(sid, session_to_dict(session))
+    logger.info(
+        "session_created",
+        session_id=sid,
+        store_mode="redis" if store.is_redis_connected else "memory",
+    )
+    return session
 
 
-def reset_session(session_id: str) -> None:
-    _sessions.pop(session_id, None)
+async def save_session(session: Session) -> None:
+    """Persist the current session state to the store."""
+    store = get_session_store()
+    await store.save(session.id, session_to_dict(session))
+
+
+async def reset_session(session_id: str) -> None:
+    """Remove a session from the store."""
+    store = get_session_store()
+    await store.delete(session_id)
 
 
 def _normalize(text: str) -> str:
@@ -160,22 +194,32 @@ def _similar_question(a: str, b: str) -> bool:
     return overlap >= 0.75
 
 
-TRIAGE_SYSTEM_PROMPT = """Voce e o agente de suporte da plataforma DR AI Workforce.
+TRIAGE_SYSTEM_PROMPT = """Voce e o agente de suporte da plataforma WORKFORCE (gestao de projetos com IA).
 
-OBJETIVO PRINCIPAL: Resolver a duvida do usuario usando a DOCUMENTACAO DISPONIVEL abaixo.
-Voce deve SEMPRE tentar explicar primeiro. So escalar para humano em casos de erro REAL do sistema.
+SOBRE A PLATAFORMA:
+Workforce e uma plataforma de gestao de projetos com IA, organizada em 4 areas:
+- Planning (gold): projetos, backlog, features, sprints, tarefas, equipes, reunioes
+- Development (silver): PRs, code review, agentes IA, repositorios
+- Quality/Bronze: bugs, testes, acessibilidade, performance
+- Governance (green): permissoes, RAG, Jira, configuracoes
 
-FLUXO DE DECISAO (siga NESTA ORDEM):
+Stack: React + TypeScript + Supabase + OpenAI. Login via Supabase Auth.
 
-1. VERIFICAR DOCUMENTACAO: A documentacao abaixo contem informacoes relevantes sobre o tema do usuario?
+OBJETIVO: Resolver a duvida do usuario usando a DOCUMENTACAO abaixo. Sempre tente EXPLICAR primeiro. So ESCALE para erros REAIS do sistema.
+
+FLUXO DE DECISAO:
+
+1. VERIFICAR DOCUMENTACAO: A documentacao abaixo cobre o tema?
    Se SIM -> EXPLICAR com base na documentacao.
 
 2. DUVIDAS DE USO (NUNCA escalar, sempre EXPLICAR):
-   - "nao consigo logar", "nao consigo acessar", "nao consigo entrar"
-   - "como faco para...", "onde fica...", "nao encontro..."
-   - "nao sei usar", "como funciona...", "onde clico..."
-   - Qualquer pergunta sobre COMO usar a plataforma
-   Estas sao DUVIDAS DE USO. Resolva pela documentacao. NAO escale.
+   - Login/acesso, navegacao, "como faco", "onde fica"
+   - Criar/editar projetos, tarefas, sprints, equipes, features, bugs
+   - Upload de documentos, transcricoes, reunioes
+   - Integracoes (Jira, GitHub, Calendar)
+   - Geracao de documentos por IA, chat RAG
+   - Backlog, priorizacao, knowledge base
+   Todas sao DUVIDAS DE USO. Resolva pela documentacao. NAO escale.
 
 3. SO ESCALAR para erros REAIS do sistema:
    - Erro 500, 502, 503, 404 persistente
@@ -184,12 +228,11 @@ FLUXO DE DECISAO (siga NESTA ORDEM):
    - Funcionalidade que ANTES funcionava e agora parou (bug confirmado)
    - Mensagens de erro do sistema (nao do usuario)
 
-4. IMPORTANTE: "Nao consigo logar" e uma DUVIDA DE USO, nao um erro do sistema.
-   O usuario pode estar errando a senha, nao saber onde acessar, ter conta desativada, etc.
-   -> EXPLICAR os passos de login baseado na documentacao.
+4. "Nao consigo logar" e DUVIDA DE USO -> EXPLICAR passos de login.
+   "Nao consigo criar tarefa" e DUVIDA DE USO -> EXPLICAR.
+   Qualquer "como faco" ou "nao consigo" sem erro tecnico -> EXPLICAR.
 
-5. Se ambiguo e AINDA ha perguntas disponiveis, faca UMA pergunta curta para desambiguar.
-   NUNCA repita uma pergunta ja feita.
+5. Se ambiguo, faca UMA pergunta curta. NUNCA repita perguntas.
 
 6. Na duvida entre EXPLICAR e ESCALAR -> PREFIRA EXPLICAR.
 
@@ -221,6 +264,23 @@ DOCUMENTACAO RELEVANTE (use EXCLUSIVAMENTE isto para explicar):
 {kb_context}
 
 Responda AGORA com o JSON exato."""
+
+
+CLASSIFY_SYSTEM_PROMPT = """Classifique a mensagem do usuario em UMA das categorias abaixo.
+
+CATEGORIAS:
+- "erro_sistema": O usuario relata um ERRO REAL do sistema (tela branca, erro 500, funcionalidade quebrada, dados corrompidos, sistema fora do ar)
+- "duvida_uso": O usuario tem uma DUVIDA sobre como usar a plataforma (como faco, onde fica, nao consigo, como funciona)
+- "solicitacao": O usuario faz uma SOLICITACAO (pede nova funcionalidade, melhoria, integracao, configuracao)
+
+Responda APENAS com JSON:
+{{"category": "erro_sistema" | "duvida_uso" | "solicitacao", "confidence": 0.0-1.0, "summary": "resumo de 1 linha"}}
+
+MENSAGEM DO USUARIO:
+{user_message}
+
+HISTORICO:
+{history}"""
 
 
 FORCED_DECIDE_PROMPT = """Voce atingiu o LIMITE de perguntas. Decida AGORA.
@@ -255,6 +315,12 @@ class TriageStep:
     sources: list[str]
     urgency: str | None = None
     error_summary: str | None = None
+    confidence: ConfidenceMetrics | None = None
+    frustration_score: float = 0.0
+    suggested_actions: list[str] | None = None
+    classification_label: str = ""
+    ticket_key: str = ""
+    ticket_url: str = ""
 
 
 def _parse_llm_json(raw: str) -> dict:
@@ -297,7 +363,7 @@ async def _call_forced_decide(session: Session, kb_context: str) -> dict:
             parsed["decision"] = "escalate"
         return parsed
     except Exception as exc:
-        logger.warning("Forced-decide parse failed: %s", exc)
+        logger.warning("forced_decide_parse_failed", error=str(exc))
         return {
             "decision": "explain",
             "explanation": (
@@ -418,6 +484,36 @@ def _detect_language(text: str) -> str:
     return "pt"
 
 
+async def _classify_message(session: Session, user_message: str) -> dict:
+    """Pre-classify the user message into a category for button confirmation."""
+    prompt = CLASSIFY_SYSTEM_PROMPT.format(
+        user_message=user_message,
+        history=session.history_as_text()[:500],
+    )
+    try:
+        raw = await _call_llm(prompt, "Responda em JSON.", max_tokens=300)
+        return _parse_llm_json(raw)
+    except Exception:
+        return {
+            "category": "duvida_uso",
+            "confidence": 0.5,
+            "summary": user_message[:100],
+        }
+
+
+CATEGORY_LABELS = {
+    "erro_sistema": "Erro no sistema",
+    "duvida_uso": "Duvida de uso",
+    "solicitacao": "Solicitacao",
+}
+
+CATEGORY_BUTTON_IDS = {
+    "erro_sistema": "confirm_erro_sistema",
+    "duvida_uso": "confirm_duvida_uso",
+    "solicitacao": "confirm_solicitacao",
+}
+
+
 async def process_turn(session: Session, user_message: str) -> TriageStep:
     """Advance the triage state machine by one user message."""
     session.add_user(user_message)
@@ -430,6 +526,7 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
         )
         session.closed = True
         session.add_bot(msg)
+        await save_session(session)
         return TriageStep(
             decision="escalate",
             message=msg,
@@ -444,6 +541,7 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
     if is_only_greeting:
         session.add_bot(WELCOME_MESSAGE)
         session.last_bot_question = WELCOME_MESSAGE
+        await save_session(session)
         return TriageStep(
             decision="ask",
             message=WELCOME_MESSAGE,
@@ -458,6 +556,7 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             "Pode descrever com mais detalhes o que voce precisa?"
         )
         session.add_bot(msg)
+        await save_session(session)
         return TriageStep(
             decision="ask",
             message=msg,
@@ -465,7 +564,162 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             sources=[],
         )
 
-    # 3) Language detection.
+    # 2.5) Handle classification confirmation from interactive buttons.
+    if session.pending_classification == "awaiting_ticket_confirm":
+        norm_msg = _normalize(user_message)
+        if norm_msg in (
+            "sim",
+            "confirmar",
+            "confirmo",
+            "sim abrir",
+            "yes",
+            "abrir chamado",
+        ):
+            session.pending_classification = ""
+            session.closed = True
+            session.add_bot("[ESCALACAO] Criando chamado...")
+            await save_session(session)
+
+            from bot.services.jira_service import create_ticket
+
+            error_summary = session.meaningful_user_text()[:200]
+            ticket = await create_ticket(
+                summary=error_summary,
+                description=session.history_as_text(),
+                urgency="urgente",
+                channel=session.channel,
+                conversation_id=session.id,
+            )
+            if ticket.success:
+                msg = (
+                    f"Chamado criado com sucesso!\n"
+                    f"Protocolo: {ticket.key}\n"
+                    f"Acompanhe em: {ticket.url}"
+                )
+            else:
+                msg = (
+                    f"Nao consegui criar o chamado: {ticket.error}\n"
+                    f"Entre em contato com o suporte manualmente."
+                )
+            session.add_bot(msg)
+            await save_session(session)
+            return TriageStep(
+                decision="escalate",
+                message=msg,
+                reason="chamado jira criado pelo usuario",
+                sources=[],
+                urgency="urgente",
+                error_summary=error_summary,
+                ticket_key=ticket.key if ticket.success else "",
+                ticket_url=ticket.url if ticket.success else "",
+            )
+        else:
+            session.pending_classification = ""
+            session.classification_confirmed = True
+            msg = "Entendi. Se precisar de mais alguma coisa, estou aqui."
+            session.add_bot(msg)
+            await save_session(session)
+            return TriageStep(
+                decision="explain",
+                message=msg,
+                reason="usuario recusou criacao de chamado",
+                sources=[],
+            )
+
+    if session.pending_classification and not session.classification_confirmed:
+        norm_msg = _normalize(user_message)
+        classification = session.pending_classification
+        if norm_msg in ("sim", "confirmar", "confirmo", "isso mesmo", "correto", "yes"):
+            session.classification_confirmed = True
+            session.pending_classification = ""
+            session.add_bot(
+                f"Categoria confirmada: {CATEGORY_LABELS.get(classification, classification)}"
+            )
+            await save_session(session)
+        elif norm_msg.startswith("nao") or norm_msg in ("errado", "incorreto", "no"):
+            session.classification_confirmed = False
+            session.pending_classification = ""
+            session.add_bot(
+                "Entendi. Vou reavaliar. Pode descrever melhor o que precisa?"
+            )
+            await save_session(session)
+            return TriageStep(
+                decision="ask",
+                message="Pode descrever melhor o que voce precisa?",
+                reason="usuario corrigiu classificacao",
+                sources=[],
+            )
+        elif any(
+            user_message.strip().startswith(prefix) for prefix in ("confirm_", "cat_")
+        ):
+            button_id = user_message.strip()
+            for cat_key, btn_id in CATEGORY_BUTTON_IDS.items():
+                if button_id == btn_id or norm_msg == _normalize(btn_id):
+                    session.classification_confirmed = True
+                    session.pending_classification = ""
+                    session.add_bot(f"Categoria confirmada: {CATEGORY_LABELS[cat_key]}")
+                    await save_session(session)
+                    break
+
+    # 2.6) Pre-classification step: classify first real message with buttons.
+    if not session.classification_confirmed and not session.pending_classification:
+        classification_result = await _classify_message(session, user_message)
+        category = classification_result.get("category", "duvida_uso")
+        summary = classification_result.get("summary", user_message[:80])
+        confidence = float(classification_result.get("confidence", 0.5))
+
+        if confidence < 0.7:
+            pass
+        else:
+            session.pending_classification = category
+            label = CATEGORY_LABELS.get(category, category)
+            msg = (
+                f"Analisei sua mensagem e parece ser: *{label}*\n"
+                f"Resumo: {summary}\n\n"
+                f"Isso esta correto?"
+            )
+            session.add_bot(msg)
+            await save_session(session)
+            return TriageStep(
+                decision="classify",
+                message=msg,
+                reason="pre-classificacao com botoes interativos",
+                sources=[],
+                classification_label=label,
+            )
+
+    # 3) Frustration detection — score the message and track the trend.
+    frustration_score, frustration_escalate = detect_frustration(
+        user_message, session.frustration_tracker
+    )
+
+    if frustration_escalate and not session.closed:
+        empathy_prefix = (
+            "Entendo sua frustracao e lamento pela experiencia. "
+            "Vou encaminhar seu caso para um atendente agora mesmo."
+        )
+        error_summary = _build_fallback_summary(session, user_message)
+        session.closed = True
+        session.add_bot(f"[ESCALACAO POR FRUSTRACAO] {error_summary}")
+        await save_session(session)
+        logger.info(
+            "frustration_escalation",
+            session_id=session.id,
+            frustration_score=frustration_score,
+            trend_avg=session.frustration_tracker.trend_average,
+            peak=session.frustration_tracker.peak_score,
+        )
+        return TriageStep(
+            decision="escalate",
+            message=f"{empathy_prefix}\n\n{error_summary}",
+            reason="escalacao automatica por frustracao elevada",
+            sources=[],
+            urgency="urgente",
+            error_summary=error_summary,
+            frustration_score=frustration_score,
+        )
+
+    # 4) Language detection.
     lang = _detect_language(user_message)
     language_instruction = (
         "Responda em INGLES. The user writes in English, reply in English."
@@ -478,6 +732,11 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
     kb_context = kb.format_context(query, max_results=5) or "(sem trechos relevantes)"
     search = kb.search(query, max_results=5)
     sources = list(dict.fromkeys(s["source"] for s in search))
+
+    # Compute confidence metrics from RAG results.
+    confidence = compute_confidence(
+        search_results=search, query=query, llm_parse_ok=True
+    )
 
     at_cap = session.questions_asked >= MAX_QUESTIONS
 
@@ -502,7 +761,10 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             raw = await _call_llm(system_prompt, "Responda em JSON.", max_tokens=800)
             parsed = _parse_llm_json(raw)
         except Exception as exc:
-            logger.warning("Triage LLM parse failed: %s", exc)
+            logger.warning("triage_llm_parse_failed", error=str(exc))
+            confidence = compute_confidence(
+                search_results=search, query=query, llm_parse_ok=False
+            )
             parsed = {
                 "decision": "explain",
                 "explanation": (
@@ -516,6 +778,25 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
 
     decision: Decision = parsed.get("decision", "ask")
 
+    # Apply confidence-based override.
+    override = should_override_decision(
+        current_decision=decision,
+        metrics=confidence,
+        questions_asked=session.questions_asked,
+        max_questions=MAX_QUESTIONS,
+    )
+    if override is not None:
+        decision = override
+
+    logger.info(
+        "triage_decision",
+        session_id=session.id,
+        decision=decision,
+        frustration_score=frustration_score,
+        frustration_trend=session.frustration_tracker.trend_average,
+        **confidence.as_dict(),
+    )
+
     # 3) Duplicate-question guard: if LLM wants to ask the same thing again,
     # force a decision instead.
     if decision == "ask":
@@ -523,7 +804,7 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
         if session.last_bot_question and _similar_question(
             new_q, session.last_bot_question
         ):
-            logger.info("Duplicate question detected — forcing decision")
+            logger.info("duplicate_question_detected", session_id=session.id)
             parsed = await _call_forced_decide(session, kb_context)
             decision = parsed.get("decision", "explain")
 
@@ -539,11 +820,14 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
         session.questions_asked += 1
         session.add_bot(question)
         session.last_bot_question = question
+        await save_session(session)
         return TriageStep(
             decision="ask",
             message=question,
             reason=parsed.get("reason") or "",
             sources=[],
+            confidence=confidence,
+            frustration_score=frustration_score,
         )
 
     if decision == "explain":
@@ -553,28 +837,46 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
                 "Com base na documentacao, este parece ser um ajuste de uso. "
                 "Verifique os passos no material de referencia abaixo."
             )
+        # Prepend empathy when moderate frustration is detected.
+        if frustration_score >= 0.4:
+            explanation = (
+                f"Entendo que isso deve ser frustrante. Vou te ajudar.\n\n{explanation}"
+            )
         session.questions_asked = 0
         session.in_follow_up = True
         session.add_bot(explanation)
+        await save_session(session)
         return TriageStep(
             decision="explain",
             message=explanation,
             reason=parsed.get("reason") or "",
             sources=sources,
+            confidence=confidence,
+            frustration_score=frustration_score,
         )
 
-    # escalate
+    # escalate — offer Jira ticket creation
     error_summary = (parsed.get("error_summary") or "").strip()
     if len(error_summary) < 10:
         error_summary = _build_fallback_summary(session, user_message)
     urgency = (parsed.get("urgency") or "urgente").strip().lower() or "urgente"
-    session.closed = True
-    session.add_bot(f"[ESCALACAO] {error_summary}")
+    if frustration_score >= 0.6:
+        urgency = "urgente"
+
+    session.pending_classification = "awaiting_ticket_confirm"
+    confirm_msg = (
+        f"Parece que voce esta enfrentando um problema tecnico: {error_summary}\n\n"
+        f"Deseja abrir um chamado para o time de suporte?"
+    )
+    session.add_bot(confirm_msg)
+    await save_session(session)
     return TriageStep(
-        decision="escalate",
-        message=error_summary,
-        reason=parsed.get("reason") or "",
+        decision="confirm_ticket",
+        message=confirm_msg,
+        reason="solicitando confirmacao para criar ticket jira",
         sources=sources,
         urgency=urgency,
         error_summary=error_summary,
+        confidence=confidence,
+        frustration_score=frustration_score,
     )

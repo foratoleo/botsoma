@@ -1,12 +1,13 @@
 import json
-import logging
+import time
 from dataclasses import dataclass
 
 import httpx
+import structlog
 
 from bot.config import ZAI_API_KEY, ZAI_MODEL, ZAI_BASE_URL, ZAI_TIMEOUT_MS
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 CLASSIFY_SYSTEM_PROMPT = """Voce e um classificador de mensagens de suporte. Sua UNICA tarefa e classificar se a mensagem do usuario descreve um ERRO/PROBLEMA tecnico ou uma PERGUNTA/INFORMACAO.
 
@@ -71,6 +72,7 @@ async def _call_llm(
         "messages": [{"role": "user", "content": user_message}],
     }
 
+    t0 = time.monotonic()
     async with httpx.AsyncClient(timeout=ZAI_TIMEOUT_MS / 1000) as client:
         response = await client.post(
             ZAI_BASE_URL,
@@ -81,12 +83,29 @@ async def _call_llm(
                 "anthropic-version": "2023-06-01",
             },
         )
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
 
     if not response.is_success:
+        logger.error(
+            "llm_call_failed",
+            status_code=response.status_code,
+            latency_ms=latency_ms,
+            model=ZAI_MODEL,
+        )
         raise Exception(f"LLM error {response.status_code}: {response.text[:200]}")
 
     data = response.json()
-    return data.get("content", [{}])[0].get("text", "")
+    text = data.get("content", [{}])[0].get("text", "")
+
+    logger.info(
+        "llm_call_completed",
+        model=ZAI_MODEL,
+        max_tokens=max_tokens,
+        latency_ms=latency_ms,
+        response_length=len(text),
+    )
+
+    return text
 
 
 async def classify_message(user_text: str) -> ClassificationResult:
@@ -109,9 +128,10 @@ async def classify_message(user_text: str) -> ClassificationResult:
         )
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning(
-            "Classification parse failed (%s), fallback to keyword check: %s",
-            exc,
-            user_text[:80],
+            "classification_parse_failed",
+            error=str(exc),
+            text_preview=user_text[:80],
+            fallback="keyword_match",
         )
 
         error_keywords = [

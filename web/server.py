@@ -1,11 +1,14 @@
-import logging
 from pathlib import Path
 
+import structlog
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
+from bot.config import REDIS_URL
+from bot.logging_config import setup_logging
 from bot.services.knowledge_base import get_knowledge_base
+from bot.services.redis_store import init_session_store
 from bot.services.triage_flow import (
     MAX_QUESTIONS,
     get_or_create_session,
@@ -13,11 +16,8 @@ from bot.services.triage_flow import (
     reset_session,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = structlog.get_logger(__name__)
 
 HTML_PATH = Path(__file__).parent / "index.html"
 
@@ -75,9 +75,9 @@ async def favicon():
 @app.post("/api/chat")
 async def chat(req: ChatRequest) -> ChatResponse:
     if req.reset and req.session_id:
-        reset_session(req.session_id)
+        await reset_session(req.session_id)
 
-    session = get_or_create_session(req.session_id)
+    session = await get_or_create_session(req.session_id)
 
     if not req.message.strip():
         return ChatResponse(
@@ -89,15 +89,21 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     if session.closed:
         # Previous session ended with escalation — start fresh.
-        reset_session(session.id)
-        session = get_or_create_session(None)
+        await reset_session(session.id)
+        session = await get_or_create_session(None)
 
-    logger.info("[%s] turn %d/%d: %s", session.id[:8], session.questions_asked + 1, MAX_QUESTIONS, req.message[:120])
+    logger.info(
+        "web_chat_turn",
+        session_id=session.id[:8],
+        turn=session.questions_asked + 1,
+        max_questions=MAX_QUESTIONS,
+        text_preview=req.message[:120],
+    )
 
     try:
         step = await process_turn(session, req.message)
     except Exception as exc:
-        logger.error("Triage error: %s", exc, exc_info=True)
+        logger.error("web_triage_error", error=str(exc), exc_info=True)
         agent = _next_agent()
         return ChatResponse(
             session_id=session.id,
@@ -111,10 +117,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
         )
 
     logger.info(
-        "[%s] decision=%s reason=%s",
-        session.id[:8],
-        step.decision,
-        (step.reason or "")[:80],
+        "web_triage_decision",
+        session_id=session.id[:8],
+        decision=step.decision,
+        reason=(step.reason or "")[:80],
     )
 
     response = ChatResponse(
@@ -147,21 +153,28 @@ def _handoff_text(agent: dict, urgency: str) -> str:
 
 @app.get("/api/health")
 async def health():
+    from bot.services.redis_store import get_session_store
+
     kb = get_knowledge_base()
+    store = get_session_store()
     return {
         "status": "ok",
         "knowledge_base_sections": kb.section_count,
         "knowledge_base_loaded": kb.is_loaded,
         "max_questions": MAX_QUESTIONS,
+        "session_store": "redis" if store.is_redis_connected else "memory",
     }
 
 
 @app.on_event("startup")
 async def startup():
-    kb = get_knowledge_base()
+    store = await init_session_store(redis_url=REDIS_URL or None)
     logger.info(
-        "Web server started — knowledge base: %d sections loaded", kb.section_count
+        "session_store_initialized",
+        mode="redis" if store.is_redis_connected else "memory",
     )
+    kb = get_knowledge_base()
+    logger.info("web_server_started", kb_sections=kb.section_count)
 
 
 if __name__ == "__main__":

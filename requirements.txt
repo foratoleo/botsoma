@@ -4,3 +4,11 @@ aiohttp==3.11.11
 botbuilder-core==4.15.0
 python-dotenv==1.0.1
 httpx==0.28.1
+structlog==24.4.0
+numpy>=1.26.0,<2
+transformers==4.38.0
+faiss-cpu>=1.8.0
+redis>=5.0.0
+rank-bm25>=0.2.2
+prometheus-client>=0.20.0
+jira>=3.10.0
