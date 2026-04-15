@@ -56,16 +56,21 @@ def _card_envelope(
     return card
 
 
-def _action_execute(title: str, verb: str, data: dict | None = None) -> dict[str, Any]:
-    """Build an Action.Execute element (Universal Action Model)."""
-    action: dict[str, Any] = {
-        "type": "Action.Execute",
+def _action_submit(title: str, verb: str, data: dict | None = None) -> dict[str, Any]:
+    """Build an Action.Submit element.
+
+    ``Action.Submit`` is used instead of ``Action.Execute`` because it works
+    reliably in Teams personal scope without requiring Universal Action Model
+    configuration in the app manifest.  The ``verb`` is embedded inside the
+    ``data`` payload so that ``on_message_activity`` can route the submission.
+    """
+    action_data = data or {}
+    action_data["verb"] = verb
+    return {
+        "type": "Action.Submit",
         "title": title,
-        "verb": verb,
+        "data": action_data,
     }
-    if data:
-        action["data"] = data
-    return action
 
 
 def _text_block(text: str, **kwargs: Any) -> dict[str, Any]:
@@ -143,22 +148,22 @@ def build_welcome_card() -> dict[str, Any]:
     ]
 
     actions = [
-        _action_execute(
+        _action_submit(
             "Problema de login",
             "login_issue",
             {"category": "login"},
         ),
-        _action_execute(
+        _action_submit(
             "Duvida sobre funcionalidade",
             "feature_question",
             {"category": "feature"},
         ),
-        _action_execute(
+        _action_submit(
             "Erro no sistema",
             "system_error",
             {"category": "error"},
         ),
-        _action_execute(
+        _action_submit(
             "Reportar problema",
             "report_problem",
             {"category": "report"},
@@ -221,12 +226,12 @@ def build_explanation_card(
     )
 
     actions = [
-        _action_execute(
+        _action_submit(
             "Sim, ajudou!",
             "feedback_yes",
             {"session_id": session_id, "helpful": True},
         ),
-        _action_execute(
+        _action_submit(
             "Nao, preciso de mais ajuda",
             "feedback_no",
             {"session_id": session_id, "helpful": False},
@@ -299,7 +304,7 @@ def build_escalation_card(
     ]
 
     actions = [
-        _action_execute(
+        _action_submit(
             "Voltar ao menu",
             "back_to_menu",
             {"session_id": session_id},
@@ -351,12 +356,12 @@ def build_feedback_card(helpful: bool, session_id: str = "") -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     if not helpful:
         actions = [
-            _action_execute(
+            _action_submit(
                 "Falar com suporte",
                 "escalate",
                 {"session_id": session_id, "reason": "feedback_negative"},
             ),
-            _action_execute(
+            _action_submit(
                 "Tentar novamente",
                 "back_to_menu",
                 {"session_id": session_id},
@@ -364,7 +369,7 @@ def build_feedback_card(helpful: bool, session_id: str = "") -> dict[str, Any]:
         ]
     else:
         actions = [
-            _action_execute(
+            _action_submit(
                 "Nova consulta",
                 "back_to_menu",
                 {"session_id": session_id},
@@ -412,7 +417,7 @@ def build_ask_card(
     if suggested_replies:
         for reply_text in suggested_replies[:4]:  # Limit to 4 quick-reply buttons
             actions.append(
-                _action_execute(
+                _action_submit(
                     reply_text,
                     "quick_reply",
                     {"session_id": session_id, "reply_text": reply_text},
@@ -551,7 +556,7 @@ def build_problem_form_card() -> dict[str, Any]:
     ]
 
     actions = [
-        _action_execute(
+        _action_submit(
             "Enviar problema",
             "submit_problem",
             {"action": "submit_problem"},
@@ -787,7 +792,7 @@ def build_problem_confirmation_card(
     ]
 
     actions = [
-        _action_execute(
+        _action_submit(
             "Voltar ao menu",
             "back_to_menu",
             {},
@@ -917,12 +922,12 @@ def build_classify_card(
     ]
 
     actions = [
-        _action_execute(
+        _action_submit(
             "Sim, esta correto",
             "confirm_classification",
             {"session_id": session_id, "answer": "sim", "label": classification_label},
         ),
-        _action_execute(
+        _action_submit(
             "Nao, classificar novamente",
             "confirm_classification",
             {"session_id": session_id, "answer": "nao"},
@@ -985,7 +990,7 @@ def build_confirm_ticket_card(
     ]
 
     actions = [
-        _action_execute(
+        _action_submit(
             "Sim, abrir chamado",
             "create_jira_ticket",
             {
@@ -994,7 +999,7 @@ def build_confirm_ticket_card(
                 "urgency": urgency,
             },
         ),
-        _action_execute(
+        _action_submit(
             "Nao, obrigado",
             "decline_jira_ticket",
             {"session_id": session_id},
@@ -1038,7 +1043,7 @@ def build_ticket_created_card(
     ]
 
     actions = [
-        _action_execute(
+        _action_submit(
             "Voltar ao menu",
             "back_to_menu",
             {"session_id": session_id},

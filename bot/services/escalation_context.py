@@ -33,7 +33,7 @@ import structlog
 from bot.services.cards import (
     CARD_SCHEMA,
     CARD_VERSION,
-    _action_execute,
+    _action_submit,
     _text_block,
     card_to_attachment,
 )
@@ -111,7 +111,9 @@ class EscalationContext:
     user_id: str = ""
     conversation_id: str = ""
     service_url: str = ""
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     urgency: str = "normal"
     error_summary: str = ""
     conversation_summary: str = ""
@@ -228,7 +230,11 @@ async def generate_conversation_summary(
             summary_length=len(summary),
         )
 
-        return summary if summary else _fallback_summary(conversation_history, error_summary)
+        return (
+            summary
+            if summary
+            else _fallback_summary(conversation_history, error_summary)
+        )
 
     except Exception as exc:
         latency_ms = round((time.monotonic() - t0) * 1000, 1)
@@ -446,9 +452,7 @@ def build_warm_handoff_card(ctx: EscalationContext) -> dict[str, Any]:
     if ctx.category:
         facts.append({"title": "Categoria", "value": ctx.category})
     if ctx.questions_asked > 0:
-        facts.append(
-            {"title": "Perguntas feitas", "value": str(ctx.questions_asked)}
-        )
+        facts.append({"title": "Perguntas feitas", "value": str(ctx.questions_asked)})
 
     info_section: list[dict[str, Any]] = [
         {
@@ -492,9 +496,7 @@ def build_warm_handoff_card(ctx: EscalationContext) -> dict[str, Any]:
         metrics_facts: list[dict[str, str]] = []
         if ctx.confidence_score > 0:
             confidence_pct = f"{ctx.confidence_score * 100:.0f}%"
-            metrics_facts.append(
-                {"title": "Confianca do bot", "value": confidence_pct}
-            )
+            metrics_facts.append({"title": "Confianca do bot", "value": confidence_pct})
         if ctx.frustration_score > 0:
             frustration_pct = f"{ctx.frustration_score * 100:.0f}%"
             metrics_facts.append(
@@ -555,12 +557,12 @@ def build_warm_handoff_card(ctx: EscalationContext) -> dict[str, Any]:
 
     # -- Actions for support agent --
     actions: list[dict[str, Any]] = [
-        _action_execute(
+        _action_submit(
             "Assumir atendimento",
             "claim_escalation",
             {"session_id": ctx.session_id, "user_id": ctx.user_id},
         ),
-        _action_execute(
+        _action_submit(
             "Solicitar mais informacoes",
             "request_more_info",
             {"session_id": ctx.session_id, "user_id": ctx.user_id},
@@ -634,7 +636,7 @@ def build_user_escalation_confirmation_card(
     ]
 
     actions: list[dict[str, Any]] = [
-        _action_execute(
+        _action_submit(
             "Voltar ao menu",
             "back_to_menu",
             {"session_id": ctx.session_id},

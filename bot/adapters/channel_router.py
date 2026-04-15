@@ -1,7 +1,7 @@
 """
 Channel router — translates TriageStep into channel-specific message formats.
 
-Teams: Adaptive Cards with Action.Execute buttons
+Teams: Adaptive Cards with Action.Submit buttons
 WhatsApp: Kapso interactive reply buttons (max 3)
 """
 
@@ -26,7 +26,7 @@ def step_to_teams_card(step: TriageStep, session_id: str = "") -> dict[str, Any]
     from bot.services.cards import (
         _card_envelope,
         _text_block,
-        _action_execute,
+        _action_submit,
     )
 
     if step.decision == "classify":
@@ -37,10 +37,10 @@ def step_to_teams_card(step: TriageStep, session_id: str = "") -> dict[str, Any]
             _text_block(step.message, spacing="Small"),
         ]
         actions = [
-            _action_execute(
+            _action_submit(
                 "Sim, esta correto", "confirm_classification", {"answer": "sim"}
             ),
-            _action_execute(
+            _action_submit(
                 "Nao, classificar novamente",
                 "confirm_classification",
                 {"answer": "nao"},
@@ -56,10 +56,10 @@ def step_to_teams_card(step: TriageStep, session_id: str = "") -> dict[str, Any]
             _text_block(step.message, spacing="Small"),
         ]
         actions = [
-            _action_execute(
+            _action_submit(
                 "Sim, abrir chamado", "create_jira_ticket", {"session_id": session_id}
             ),
-            _action_execute(
+            _action_submit(
                 "Nao, obrigado", "decline_jira_ticket", {"session_id": session_id}
             ),
         ]

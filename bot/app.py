@@ -105,6 +105,12 @@ NO_SUPPORT_CONFIGURED = (
 
 class TriageBot(ActivityHandler):
     async def on_message_activity(self, turn_context: TurnContext):
+        # Action.Submit from Adaptive Cards arrives as a message with value payload.
+        action_data = turn_context.activity.value
+        if isinstance(action_data, dict) and "verb" in action_data:
+            await self._handle_card_submit(turn_context, action_data)
+            return
+
         user_text = (turn_context.activity.text or "").strip()
         if not user_text:
             return
@@ -708,6 +714,52 @@ class TriageBot(ActivityHandler):
             urgency=step.urgency or "normal",
             session_id=session_id,
         )
+
+    async def _handle_card_submit(
+        self,
+        turn_context: TurnContext,
+        action_data: dict,
+    ) -> None:
+        """Route an Action.Submit payload through the same card-action handler.
+
+        Reuses ``_handle_card_action`` for business logic, then extracts the
+        resulting card from the InvokeResponse and sends it as a regular
+        message activity (since Action.Submit doesn't support in-place refresh).
+        """
+        conversation_id = turn_context.activity.conversation.id
+        user_name = turn_context.activity.from_property.name or "Usuario"
+        service_url = turn_context.activity.service_url
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        log = logger.bind(
+            conversation_id=conversation_id[:20],
+            user_name=user_name,
+            verb=action_data.get("verb"),
+        )
+        log.info("card_submit_received")
+
+        verb = action_data.get("verb", "")
+        result = await self._handle_card_action(
+            turn_context,
+            verb,
+            action_data,
+            conversation_id,
+            user_name,
+            service_url,
+            timestamp,
+            log,
+        )
+
+        if result and result.body and isinstance(result.body, dict):
+            card = result.body.get("value")
+            if card and isinstance(card, dict):
+                await turn_context.send_activity(
+                    Activity(
+                        type=ActivityTypes.message,
+                        attachments=[card_to_attachment(card)],
+                        text=card.get("fallbackText", ""),
+                    )
+                )
 
     async def _send_escalation_notifications(
         self,

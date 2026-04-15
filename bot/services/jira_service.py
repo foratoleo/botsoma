@@ -77,78 +77,21 @@ def _create_issue_sync(
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    adf_description = {
-        "type": "doc",
-        "version": 1,
-        "content": [
-            {
-                "type": "paragraph",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": description or "(sem descricao detalhada)",
-                    }
-                ],
-            },
-            {
-                "type": "paragraph",
-                "content": [
-                    {"type": "text", "text": "---"},
-                ],
-            },
-            {
-                "type": "paragraph",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Canal: {channel}",
-                        "marks": [{"type": "strong"}],
-                    },
-                    {"type": "text", "text": " | "},
-                    {
-                        "type": "text",
-                        "text": f"Usuario: {user_name or 'N/A'}",
-                        "marks": [{"type": "strong"}],
-                    },
-                    {"type": "text", "text": " | "},
-                    {
-                        "type": "text",
-                        "text": f"Urgencia: {urgency}",
-                        "marks": [{"type": "strong"}],
-                    },
-                ],
-            },
-            {
-                "type": "paragraph",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Classificacao bot: {classification_label or 'N/A'}",
-                    },
-                ],
-            },
-            {
-                "type": "paragraph",
-                "content": [
-                    {"type": "text", "text": f"Criado em: {timestamp}"},
-                ],
-            },
-            {
-                "type": "paragraph",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Conversation ID: {conversation_id or 'N/A'}",
-                    },
-                ],
-            },
-        ],
-    }
+    # Jira Cloud REST API v2 (used by jira-python) requires description as
+    # a plain string.  ADF dicts only work with v3.
+    plain_description = (
+        f"{description or '(sem descricao detalhada)'}\n\n"
+        f"---\n"
+        f"Canal: {channel} | Usuario: {user_name or 'N/A'} | Urgencia: {urgency}\n"
+        f"Classificacao bot: {classification_label or 'N/A'}\n"
+        f"Criado em: {timestamp}\n"
+        f"Conversation ID: {conversation_id or 'N/A'}"
+    )
 
     fields = {
         "project": {"key": JIRA_PROJECT_KEY},
         "summary": summary[:255],
-        "description": adf_description,
+        "description": plain_description,
         "issuetype": {"name": JIRA_ISSUE_TYPE_NAME},
     }
 
