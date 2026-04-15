@@ -83,7 +83,7 @@ class Session:
     last_bot_question: str = ""
     in_follow_up: bool = False
     frustration_tracker: FrustrationTracker = field(default_factory=FrustrationTracker)
-    pending_classification: str = ""
+    pending_classification: str | None = None
     classification_confirmed: bool = False
     channel: str = "teams"
 
@@ -318,6 +318,10 @@ class TriageStep:
     confidence: ConfidenceMetrics | None = None
     frustration_score: float = 0.0
     suggested_actions: list[str] | None = None
+    buttons: list[dict[str, str]] | None = None
+    classification_suggestion: str | None = None
+    jira_ticket_key: str | None = None
+    jira_ticket_url: str | None = None
     classification_label: str = ""
     ticket_key: str = ""
     ticket_url: str = ""
@@ -513,16 +517,287 @@ CATEGORY_BUTTON_IDS = {
     "solicitacao": "confirm_solicitacao",
 }
 
+BUTTON_CLASSIFICATION_LABELS = {
+    "DUVIDA": "dúvida",
+    "ERRO": "erro",
+    "OUTRO": "outro assunto",
+}
 
-async def process_turn(session: Session, user_message: str) -> TriageStep:
+
+def _normalize_button_classification(value: str | None) -> str:
+    """Map arbitrary classifier outputs into DUVIDA/ERRO/OUTRO."""
+    norm = _normalize(value or "")
+    if norm in {"duvida", "duvida_uso", "duvida de uso", "question", "pergunta"}:
+        return "DUVIDA"
+    if norm in {
+        "erro",
+        "erro_sistema",
+        "erro sistema",
+        "problema",
+        "bug",
+        "issue",
+        "error",
+    }:
+        return "ERRO"
+    return "OUTRO"
+
+
+def _build_classification_buttons(classification: str) -> list[dict[str, str]]:
+    """Return confirmation buttons anchored on the current suggestion."""
+    if classification == "ERRO":
+        return [
+            {"id": "confirm_ERRO", "title": "✅ Sim, é um erro"},
+            {"id": "change_DUVIDA", "title": "❓ Na verdade, é uma dúvida"},
+            {"id": "change_OUTRO", "title": "📝 Outro assunto"},
+        ]
+    if classification == "OUTRO":
+        return [
+            {"id": "confirm_OUTRO", "title": "✅ Sim, é outro assunto"},
+            {"id": "change_DUVIDA", "title": "❓ Na verdade, é uma dúvida"},
+            {"id": "change_ERRO", "title": "🐛 Na verdade, é um erro"},
+        ]
+    return [
+        {"id": "confirm_DUVIDA", "title": "✅ Sim, é uma dúvida"},
+        {"id": "change_ERRO", "title": "❌ É um erro"},
+        {"id": "change_OUTRO", "title": "📝 Outro assunto"},
+    ]
+
+
+async def classify_with_buttons(
+    session: Session,
+    user_message: str,
+    kb_context: str,
+    language_instruction: str,
+) -> TriageStep:
+    """Suggest a classification and return the interactive buttons."""
+    norm = _normalize(user_message)
+    if _is_greeting(user_message) or norm in {"ajuda", "help", "suporte"}:
+        return TriageStep(
+            decision="classify",
+            message="Posso te direcionar melhor. O que você precisa?",
+            reason="mensagem vaga — classificação direta por botões",
+            sources=[],
+            buttons=[
+                {"id": "direct_DUVIDA", "title": "❓ Tenho uma dúvida"},
+                {"id": "direct_ERRO", "title": "🐛 Tenho um erro/problema"},
+                {"id": "direct_OUTRO", "title": "📝 Outro assunto"},
+            ],
+        )
+
+    prompt = f"""Classifique a solicitação do usuário em apenas UMA categoria.
+
+Categorias válidas:
+- duvida
+- erro
+- outro
+
+Considere apenas a intenção principal da mensagem. Responda APENAS em JSON:
+{{"classification": "duvida" | "erro" | "outro", "reason": "motivo curto"}}
+
+{language_instruction}
+
+HISTÓRICO:
+{session.history_as_text()[-1200:]}
+
+MENSAGEM ATUAL:
+{user_message}
+
+CONTEXTO DA BASE (apenas como referência, se ajudar):
+{kb_context[:1200]}"""
+
+    try:
+        raw = await _call_llm(prompt, "Responda em JSON.", max_tokens=200)
+        parsed = _parse_llm_json(raw)
+        classification = _normalize_button_classification(
+            parsed.get("classification") or parsed.get("category")
+        )
+    except Exception as exc:
+        logger.warning(
+            "button_classification_failed", error=str(exc), session_id=session.id
+        )
+        classification = "DUVIDA"
+
+    session.pending_classification = classification
+    session.classification_confirmed = False
+
+    label = BUTTON_CLASSIFICATION_LABELS[classification]
+    return TriageStep(
+        decision="classify",
+        message=f"Pelo que entendi, isso parece ser uma {label}. Confirma?",
+        reason="classificação inicial com confirmação por botões",
+        sources=[],
+        buttons=_build_classification_buttons(classification),
+        classification_suggestion=classification,
+        classification_label=label.title(),
+    )
+
+
+async def handle_button_response(session: Session, button_id: str) -> TriageStep:
+    """Handle classification buttons before the normal triage flow continues."""
+    prefix, _, raw_classification = button_id.partition("_")
+    classification = _normalize_button_classification(raw_classification)
+
+    if prefix not in {"confirm", "change", "direct"}:
+        return TriageStep(
+            decision="ask",
+            message="Não entendi essa ação. Pode me contar com mais detalhes o que você precisa?",
+            reason="botão de classificação inválido",
+            sources=[],
+        )
+
+    session.pending_classification = None
+
+    if classification == "DUVIDA":
+        session.classification_confirmed = True
+        return TriageStep(
+            decision="explain",
+            message="",
+            reason="usuário confirmou classificação como dúvida",
+            sources=[],
+            classification_suggestion=classification,
+            classification_label="Dúvida",
+        )
+
+    if classification == "ERRO":
+        session.classification_confirmed = True
+        message = "Entendi que é um erro. Quer que eu abra um chamado?"
+        session.add_bot(message)
+        await save_session(session)
+        return TriageStep(
+            decision="confirm_ticket",
+            message=message,
+            reason="usuário classificou a conversa como erro",
+            sources=[],
+            buttons=[
+                {"id": "open_ticket_YES", "title": "✅ Sim, abrir chamado"},
+                {"id": "open_ticket_NO", "title": "❌ Não, obrigado"},
+            ],
+            classification_suggestion=classification,
+            classification_label="Erro",
+        )
+
+    session.classification_confirmed = True
+    message = (
+        "Certo. Me descreva melhor sua necessidade para eu te orientar da melhor forma."
+    )
+    session.add_bot(message)
+    await save_session(session)
+    return TriageStep(
+        decision="ask",
+        message=message,
+        reason="usuário escolheu outro assunto",
+        sources=[],
+        classification_suggestion=classification,
+        classification_label="Outro assunto",
+    )
+
+
+async def handle_ticket_confirmation(
+    session: Session,
+    button_id: str,
+    user_message: str,
+    conversation_history: str,
+) -> TriageStep:
+    """Create a Jira ticket or gracefully decline when the user decides."""
+    if button_id == "open_ticket_NO":
+        message = "Entendi. Se precisar de algo, é só falar!"
+        session.add_bot(message)
+        await save_session(session)
+        return TriageStep(
+            decision="ask",
+            message=message,
+            reason="usuário optou por não abrir chamado",
+            sources=[],
+        )
+
+    summary = _build_fallback_summary(session, user_message)
+    description = conversation_history or session.history_as_text()
+    session.closed = True
+
+    try:
+        from bot.services.jira_service import get_jira_service  # type: ignore[attr-defined]
+
+        jira_service = get_jira_service()
+        ticket = await jira_service.create_support_ticket(
+            summary=summary,
+            description=description,
+            urgency="urgente",
+            channel=session.channel,
+            conversation_id=session.id,
+            classification_label="Erro",
+        )
+        ticket_key = getattr(ticket, "key", "")
+        ticket_url = getattr(ticket, "url", "")
+        ticket_success = bool(
+            getattr(ticket, "success", bool(ticket_key and ticket_url))
+        )
+        ticket_error = getattr(ticket, "error", "")
+    except Exception:
+        from bot.services.jira_service import create_ticket
+
+        ticket = await create_ticket(
+            summary=summary,
+            description=description,
+            urgency="urgente",
+            channel=session.channel,
+            conversation_id=session.id,
+            classification_label="Erro",
+        )
+        ticket_key = getattr(ticket, "key", "")
+        ticket_url = getattr(ticket, "url", "")
+        ticket_success = bool(
+            getattr(ticket, "success", bool(ticket_key and ticket_url))
+        )
+        ticket_error = getattr(ticket, "error", "")
+
+    if ticket_success:
+        message = f"Seu chamado #{ticket_key} foi aberto!\nAcompanhe: {ticket_url}"
+    else:
+        message = (
+            "Não consegui abrir o chamado automaticamente agora. "
+            f"Detalhe: {ticket_error or 'falha desconhecida.'}"
+        )
+
+    session.add_bot(message)
+    await save_session(session)
+    return TriageStep(
+        decision="escalate",
+        message=message,
+        reason="confirmação de abertura de ticket Jira",
+        sources=[],
+        urgency="urgente",
+        error_summary=summary,
+        jira_ticket_key=ticket_key or None,
+        jira_ticket_url=ticket_url or None,
+        ticket_key=ticket_key,
+        ticket_url=ticket_url,
+    )
+
+
+async def process_turn(
+    session: Session,
+    user_message: str,
+    button_id: str | None = None,
+) -> TriageStep:
     """Advance the triage state machine by one user message."""
-    session.add_user(user_message)
+    if button_id is not None:
+        if button_id.startswith("open_ticket_"):
+            return await handle_ticket_confirmation(
+                session,
+                button_id,
+                user_message,
+                session.history_as_text(),
+            )
+
+        button_step = await handle_button_response(session, button_id)
+        if button_step.decision != "explain":
+            return button_step
+        user_message = session.meaningful_user_text() or user_message
+    else:
+        session.add_user(user_message)
 
     # 0) MAX_TURNS guard — prevent infinite follow-up loops.
-    if (
-        len(session.turns) > MAX_TURNS
-        and session.pending_classification != "awaiting_ticket_confirm"
-    ):
+    if len(session.turns) > MAX_TURNS:
         msg = (
             "Atingimos o limite de mensagens para esta conversa. "
             "Se ainda precisar de ajuda, clique em 'Nova conversa' para recomecar."
@@ -567,134 +842,34 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             sources=[],
         )
 
-    # 2.5) Handle classification confirmation from interactive buttons.
-    if session.pending_classification == "awaiting_ticket_confirm":
-        norm_msg = _normalize(user_message)
-        if norm_msg in (
-            "sim",
-            "confirmar",
-            "confirmo",
-            "sim abrir",
-            "yes",
-            "abrir chamado",
-            "abre um chamado",
-            "abre chamado",
-            "abre um",
-        ):
-            session.pending_classification = ""
-            session.closed = True
-            session.add_bot("[ESCALACAO] Criando chamado...")
-            await save_session(session)
+    # 3) Language detection.
+    lang = _detect_language(user_message)
+    language_instruction = (
+        "Responda em INGLES. The user writes in English, reply in English."
+        if lang == "en"
+        else ""
+    )
 
-            from bot.services.jira_service import create_ticket
+    kb = get_knowledge_base()
+    query = session.meaningful_user_text() or user_message
+    kb_context = kb.format_context(query, max_results=5) or "(sem trechos relevantes)"
+    search = kb.search(query, max_results=5)
+    sources = list(dict.fromkeys(s["source"] for s in search))
 
-            error_summary = session.meaningful_user_text()[:200]
-            ticket = await create_ticket(
-                summary=error_summary,
-                description=session.history_as_text(),
-                urgency="urgente",
-                channel=session.channel,
-                conversation_id=session.id,
-            )
-            if ticket.success:
-                msg = (
-                    f"Chamado criado com sucesso!\n"
-                    f"Protocolo: {ticket.key}\n"
-                    f"Acompanhe em: {ticket.url}"
-                )
-            else:
-                msg = (
-                    f"Nao consegui criar o chamado: {ticket.error}\n"
-                    f"Entre em contato com o suporte manualmente."
-                )
-            session.add_bot(msg)
-            await save_session(session)
-            return TriageStep(
-                decision="escalate",
-                message=msg,
-                reason="chamado jira criado pelo usuario",
-                sources=[],
-                urgency="urgente",
-                error_summary=error_summary,
-                ticket_key=ticket.key if ticket.success else "",
-                ticket_url=ticket.url if ticket.success else "",
-            )
-        else:
-            session.pending_classification = ""
-            session.classification_confirmed = True
-            msg = "Entendi. Se precisar de mais alguma coisa, estou aqui."
-            session.add_bot(msg)
-            await save_session(session)
-            return TriageStep(
-                decision="explain",
-                message=msg,
-                reason="usuario recusou criacao de chamado",
-                sources=[],
-            )
+    if button_id is None and not session.classification_confirmed:
+        if session.pending_classification is not None:
+            session.pending_classification = None
+        classify_step = await classify_with_buttons(
+            session,
+            user_message,
+            kb_context,
+            language_instruction,
+        )
+        session.add_bot(classify_step.message)
+        await save_session(session)
+        return classify_step
 
-    if session.pending_classification and not session.classification_confirmed:
-        norm_msg = _normalize(user_message)
-        classification = session.pending_classification
-        if norm_msg in ("sim", "confirmar", "confirmo", "isso mesmo", "correto", "yes"):
-            session.classification_confirmed = True
-            session.pending_classification = ""
-            session.add_bot(
-                f"Categoria confirmada: {CATEGORY_LABELS.get(classification, classification)}"
-            )
-            await save_session(session)
-        elif norm_msg.startswith("nao") or norm_msg in ("errado", "incorreto", "no"):
-            session.classification_confirmed = False
-            session.pending_classification = ""
-            session.add_bot(
-                "Entendi. Vou reavaliar. Pode descrever melhor o que precisa?"
-            )
-            await save_session(session)
-            return TriageStep(
-                decision="ask",
-                message="Pode descrever melhor o que voce precisa?",
-                reason="usuario corrigiu classificacao",
-                sources=[],
-            )
-        elif any(
-            user_message.strip().startswith(prefix) for prefix in ("confirm_", "cat_")
-        ):
-            button_id = user_message.strip()
-            for cat_key, btn_id in CATEGORY_BUTTON_IDS.items():
-                if button_id == btn_id or norm_msg == _normalize(btn_id):
-                    session.classification_confirmed = True
-                    session.pending_classification = ""
-                    session.add_bot(f"Categoria confirmada: {CATEGORY_LABELS[cat_key]}")
-                    await save_session(session)
-                    break
-
-    # 2.6) Pre-classification step: classify first real message with buttons.
-    if not session.classification_confirmed and not session.pending_classification:
-        classification_result = await _classify_message(session, user_message)
-        category = classification_result.get("category", "duvida_uso")
-        summary = classification_result.get("summary", user_message[:80])
-        confidence = float(classification_result.get("confidence", 0.5))
-
-        if confidence < 0.7:
-            pass
-        else:
-            session.pending_classification = category
-            label = CATEGORY_LABELS.get(category, category)
-            msg = (
-                f"Analisei sua mensagem e parece ser: *{label}*\n"
-                f"Resumo: {summary}\n\n"
-                f"Isso esta correto?"
-            )
-            session.add_bot(msg)
-            await save_session(session)
-            return TriageStep(
-                decision="classify",
-                message=msg,
-                reason="pre-classificacao com botoes interativos",
-                sources=[],
-                classification_label=label,
-            )
-
-    # 3) Frustration detection — score the message and track the trend.
+    # 4) Frustration detection — score the message and track the trend.
     frustration_score, frustration_escalate = detect_frustration(
         user_message, session.frustration_tracker
     )
@@ -724,20 +899,6 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             error_summary=error_summary,
             frustration_score=frustration_score,
         )
-
-    # 4) Language detection.
-    lang = _detect_language(user_message)
-    language_instruction = (
-        "Responda em INGLES. The user writes in English, reply in English."
-        if lang == "en"
-        else ""
-    )
-
-    kb = get_knowledge_base()
-    query = session.meaningful_user_text() or user_message
-    kb_context = kb.format_context(query, max_results=5) or "(sem trechos relevantes)"
-    search = kb.search(query, max_results=5)
-    sources = list(dict.fromkeys(s["source"] for s in search))
 
     # Compute confidence metrics from RAG results.
     confidence = compute_confidence(
@@ -850,6 +1011,8 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             )
         session.questions_asked = 0
         session.in_follow_up = True
+        session.pending_classification = None
+        session.classification_confirmed = True
         session.add_bot(explanation)
         await save_session(session)
         return TriageStep(
@@ -869,7 +1032,6 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
     if frustration_score >= 0.6:
         urgency = "urgente"
 
-    session.pending_classification = "awaiting_ticket_confirm"
     confirm_msg = (
         f"Parece que voce esta enfrentando um problema tecnico: {error_summary}\n\n"
         f"Deseja abrir um chamado para o time de suporte?"
@@ -885,4 +1047,8 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
         error_summary=error_summary,
         confidence=confidence,
         frustration_score=frustration_score,
+        buttons=[
+            {"id": "open_ticket_YES", "title": "✅ Sim, abrir chamado"},
+            {"id": "open_ticket_NO", "title": "❌ Não, obrigado"},
+        ],
     )
