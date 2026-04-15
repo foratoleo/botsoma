@@ -46,15 +46,17 @@ SUPPORT_CHANNEL_ID = os.getenv("SUPPORT_CHANNEL_ID", "")
 TOKEN_EXPIRY_BUFFER_S = 60
 
 # --- Kapso (WhatsApp proxy) ---
-KAPSO_API_BASE_URL = os.getenv("KAPSO_API_BASE_URL", "")
+KAPSO_API_BASE_URL = os.getenv("KAPSO_API_BASE_URL", "https://api.kapso.ai")
 KAPSO_API_KEY = os.getenv("KAPSO_API_KEY", "")
 KAPSO_PHONE_NUMBER_ID = os.getenv("KAPSO_PHONE_NUMBER_ID", "")
-KAPSO_META_GRAPH_VERSION = os.getenv("KAPSO_META_GRAPH_VERSION", "v21.0")
+KAPSO_META_GRAPH_VERSION = os.getenv("KAPSO_META_GRAPH_VERSION", "v24.0")
 KAPSO_WEBHOOK_VERIFY_TOKEN = os.getenv("KAPSO_WEBHOOK_VERIFY_TOKEN", "")
 
 # --- Jira ---
 JIRA_URL = os.getenv("JIRA_URL", "https://botdr.atlassian.net")
 JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")
 JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
+JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "")
 JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY", "SCRUM")
+JIRA_COMPONENT = os.getenv("JIRA_COMPONENT", "Support")
 JIRA_ISSUE_TYPE_NAME = os.getenv("JIRA_ISSUE_TYPE_NAME", "Tarefa")

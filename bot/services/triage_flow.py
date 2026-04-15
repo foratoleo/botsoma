@@ -46,7 +46,7 @@ from bot.services.sentiment import FrustrationTracker, detect_frustration
 logger = structlog.get_logger(__name__)
 
 MAX_QUESTIONS = 3
-MAX_TURNS = 10
+MAX_TURNS = 30
 
 Decision = Literal["ask", "explain", "escalate", "classify", "confirm_ticket"]
 
@@ -519,7 +519,10 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
     session.add_user(user_message)
 
     # 0) MAX_TURNS guard — prevent infinite follow-up loops.
-    if len(session.turns) > MAX_TURNS:
+    if (
+        len(session.turns) > MAX_TURNS
+        and session.pending_classification != "awaiting_ticket_confirm"
+    ):
         msg = (
             "Atingimos o limite de mensagens para esta conversa. "
             "Se ainda precisar de ajuda, clique em 'Nova conversa' para recomecar."
@@ -574,6 +577,9 @@ async def process_turn(session: Session, user_message: str) -> TriageStep:
             "sim abrir",
             "yes",
             "abrir chamado",
+            "abre um chamado",
+            "abre chamado",
+            "abre um",
         ):
             session.pending_classification = ""
             session.closed = True

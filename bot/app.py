@@ -339,11 +339,21 @@ class TriageBot(ActivityHandler):
     @staticmethod
     def _invoke_ok(body: dict | None = None) -> InvokeResponse:
         """Return a successful (200) InvokeResponse."""
-        import json as _json
-
         return InvokeResponse(
             status=200,
             body=body,
+        )
+
+    @staticmethod
+    def _invoke_card(card: dict) -> InvokeResponse:
+        """Return an adaptiveCard/action response with a card refresh."""
+        return InvokeResponse(
+            status=200,
+            body={
+                "statusCode": 200,
+                "type": "application/vnd.microsoft.card.adaptive",
+                "value": card,
+            },
         )
 
     @staticmethod
@@ -399,7 +409,7 @@ class TriageBot(ActivityHandler):
             )
 
             card = self._step_to_card(step, session.id)
-            return self._invoke_ok(card)
+            return self._invoke_card(card)
 
         # -- Escalate from card --
         if verb == "escalate":
@@ -431,20 +441,20 @@ class TriageBot(ActivityHandler):
                 urgency="normal",
                 session_id=session.id,
             )
-            return self._invoke_ok(card)
+            return self._invoke_card(card)
 
         # -- Back to menu --
         if verb == "back_to_menu":
             await reset_session(conversation_id)
             card = build_welcome_card()
-            return self._invoke_ok(card)
+            return self._invoke_card(card)
 
         # -- Feedback buttons --
         if verb in ("feedback_yes", "feedback_no"):
             helpful = verb == "feedback_yes"
             log.info("feedback_received", helpful=helpful, session_id=session_id)
             card = build_feedback_card(helpful=helpful, session_id=session_id)
-            return self._invoke_ok(card)
+            return self._invoke_card(card)
 
         # -- Quick reply from ask card --
         if verb == "quick_reply":
@@ -473,7 +483,7 @@ class TriageBot(ActivityHandler):
             )
 
             card = self._step_to_card(step, session.id)
-            return self._invoke_ok(card)
+            return self._invoke_card(card)
 
         # -- Report problem (opens task module) --
         if verb == "report_problem":
@@ -502,11 +512,41 @@ class TriageBot(ActivityHandler):
                 from bot.services.triage_flow import save_session
 
                 await save_session(session)
-                synthetic = data.get("label", "duvida_uso")
-                log.info("classification_confirmed", label=synthetic)
+
+                last_user_text = ""
+                for t in reversed(session.turns):
+                    if t.get("role") == "user" and t.get("content", "").strip():
+                        last_user_text = t["content"].strip()
+                        break
+
+                if last_user_text:
+                    async with track_triage_latency():
+                        t0 = time.monotonic()
+                        step = await process_turn(session, last_user_text)
+                        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+
+                    record_triage_decision(step.decision, step.urgency)
+                    log.info(
+                        "triage_decision",
+                        session_id=session.id,
+                        decision=step.decision,
+                        latency_ms=latency_ms,
+                        source="classification_confirmed",
+                    )
+                    card = self._step_to_card(step, session.id)
+                    return self._invoke_card(card)
+                else:
+                    synthetic = data.get("label", "duvida_uso")
+                    log.info("classification_confirmed_no_text", label=synthetic)
+            else:
+                session.classification_confirmed = False
+                session.pending_classification = ""
+                from bot.services.triage_flow import save_session
+
+                await save_session(session)
 
             card = build_welcome_card()
-            return self._invoke_ok(card)
+            return self._invoke_card(card)
 
         # -- Create Jira ticket (confirm_ticket card button) --
         if verb == "create_jira_ticket":
@@ -546,7 +586,7 @@ class TriageBot(ActivityHandler):
                     urgency=urgency,
                     session_id=session.id,
                 )
-            return self._invoke_ok(card)
+            return self._invoke_card(card)
 
         # -- Decline Jira ticket --
         if verb == "decline_jira_ticket":
@@ -559,7 +599,7 @@ class TriageBot(ActivityHandler):
                 await save_session(session)
 
             card = build_welcome_card()
-            return self._invoke_ok(card)
+            return self._invoke_card(card)
 
         log.warning("unrecognized_verb", verb=verb)
         return self._invoke_ok()
