@@ -39,8 +39,9 @@ CARD_VERSION = "1.5"
 # ---------------------------------------------------------------------------
 
 
-def _card_envelope(body: list[dict], actions: list[dict] | None = None,
-                   fallback_text: str = "") -> dict[str, Any]:
+def _card_envelope(
+    body: list[dict], actions: list[dict] | None = None, fallback_text: str = ""
+) -> dict[str, Any]:
     """Wrap body elements and actions into a complete Adaptive Card JSON."""
     card: dict[str, Any] = {
         "$schema": CARD_SCHEMA,
@@ -533,9 +534,7 @@ def build_problem_form_card() -> dict[str, Any]:
             "isMultiline": True,
             "isRequired": False,
             "placeholder": (
-                "1. Acessei a pagina X\n"
-                "2. Cliquei no botao Y\n"
-                "3. Apareceu o erro Z"
+                "1. Acessei a pagina X\n2. Cliquei no botao Y\n3. Apareceu o erro Z"
             ),
             "maxLength": 1500,
         },
@@ -896,13 +895,170 @@ def build_escalation_notification_card(
 
 
 # ---------------------------------------------------------------------------
+# Classification Confirmation Card
+# ---------------------------------------------------------------------------
+
+
+def build_classify_card(
+    message: str,
+    classification_label: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    fallback = f"{message} Responda Sim ou Nao."
+
+    body: list[dict[str, Any]] = [
+        _text_block(
+            "Classificacao",
+            size="Medium",
+            weight="Bolder",
+            color="Accent",
+        ),
+        _text_block(message, spacing="Small"),
+    ]
+
+    actions = [
+        _action_execute(
+            "Sim, esta correto",
+            "confirm_classification",
+            {"session_id": session_id, "answer": "sim", "label": classification_label},
+        ),
+        _action_execute(
+            "Nao, classificar novamente",
+            "confirm_classification",
+            {"session_id": session_id, "answer": "nao"},
+        ),
+    ]
+
+    return _card_envelope(body, actions, fallback_text=fallback)
+
+
+# ---------------------------------------------------------------------------
+# Confirm Ticket Card (Jira)
+# ---------------------------------------------------------------------------
+
+
+def build_confirm_ticket_card(
+    error_summary: str,
+    urgency: str = "normal",
+    session_id: str = "",
+) -> dict[str, Any]:
+    urgency_colors = {
+        "urgente": "Attention",
+        "normal": "Warning",
+        "baixa": "Good",
+    }
+    urgency_color = urgency_colors.get(urgency, "Default")
+
+    fallback = (
+        f"Problema detectado: {error_summary} | "
+        f"Deseja abrir chamado? Responda Sim ou Nao."
+    )
+
+    body: list[dict[str, Any]] = [
+        _text_block(
+            "Problema detectado",
+            size="Medium",
+            weight="Bolder",
+            color="Attention",
+        ),
+        _text_block(
+            f"Parece que voce esta enfrentando um problema tecnico:",
+            spacing="Small",
+        ),
+        _text_block(
+            error_summary[:300],
+            spacing="Small",
+            isSubtle=True,
+        ),
+        _text_block(
+            f"Urgencia: {urgency.upper()}",
+            size="Small",
+            weight="Bolder",
+            color=urgency_color,
+            spacing="Medium",
+        ),
+        _text_block(
+            "Deseja abrir um chamado para o time de suporte?",
+            weight="Bolder",
+            spacing="Medium",
+        ),
+    ]
+
+    actions = [
+        _action_execute(
+            "Sim, abrir chamado",
+            "create_jira_ticket",
+            {
+                "session_id": session_id,
+                "error_summary": error_summary,
+                "urgency": urgency,
+            },
+        ),
+        _action_execute(
+            "Nao, obrigado",
+            "decline_jira_ticket",
+            {"session_id": session_id},
+        ),
+    ]
+
+    return _card_envelope(body, actions, fallback_text=fallback)
+
+
+# ---------------------------------------------------------------------------
+# Ticket Created Card
+# ---------------------------------------------------------------------------
+
+
+def build_ticket_created_card(
+    ticket_key: str,
+    ticket_url: str,
+    session_id: str = "",
+) -> dict[str, Any]:
+    fallback = f"Chamado criado: {ticket_key} - {ticket_url}"
+
+    body: list[dict[str, Any]] = [
+        _text_block(
+            "Chamado Criado",
+            size="Medium",
+            weight="Bolder",
+            color="Good",
+        ),
+        _text_block(
+            "Seu chamado foi registrado com sucesso!",
+            spacing="Small",
+        ),
+        {
+            "type": "FactSet",
+            "spacing": "Medium",
+            "facts": [
+                {"title": "Protocolo", "value": ticket_key},
+                {"title": "Link", "value": f"[Acompanhar]({ticket_url})"},
+            ],
+        },
+    ]
+
+    actions = [
+        _action_execute(
+            "Voltar ao menu",
+            "back_to_menu",
+            {"session_id": session_id},
+        ),
+    ]
+
+    return _card_envelope(body, actions, fallback_text=fallback)
+
+
+# ---------------------------------------------------------------------------
 # Task Module response helpers
 # ---------------------------------------------------------------------------
 
 
-def build_task_module_response(card: dict[str, Any], title: str = "Workforce Help",
-                               width: str = "medium",
-                               height: str = "medium") -> dict[str, Any]:
+def build_task_module_response(
+    card: dict[str, Any],
+    title: str = "Workforce Help",
+    width: str = "medium",
+    height: str = "medium",
+) -> dict[str, Any]:
     """Wrap a card in a Task Module (task/fetch) response envelope.
 
     Parameters

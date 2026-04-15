@@ -27,7 +27,11 @@ FAISS_INDEX_PATH = Path(os.getenv("FAISS_INDEX_PATH", ".cache/faiss_index"))
 EMBEDDING_TOP_K = int(os.getenv("EMBEDDING_TOP_K", "5"))
 
 # Hybrid search settings
-HYBRID_SEARCH_ENABLED = os.getenv("HYBRID_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+HYBRID_SEARCH_ENABLED = os.getenv("HYBRID_SEARCH_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 HYBRID_RRF_K = int(os.getenv("HYBRID_RRF_K", "60"))
 HYBRID_SPARSE_TOP_K = int(os.getenv("HYBRID_SPARSE_TOP_K", "20"))
 
@@ -40,3 +44,17 @@ SUPPORT_USER_IDS = [
 SUPPORT_CHANNEL_ID = os.getenv("SUPPORT_CHANNEL_ID", "")
 
 TOKEN_EXPIRY_BUFFER_S = 60
+
+# --- Kapso (WhatsApp proxy) ---
+KAPSO_API_BASE_URL = os.getenv("KAPSO_API_BASE_URL", "")
+KAPSO_API_KEY = os.getenv("KAPSO_API_KEY", "")
+KAPSO_PHONE_NUMBER_ID = os.getenv("KAPSO_PHONE_NUMBER_ID", "")
+KAPSO_META_GRAPH_VERSION = os.getenv("KAPSO_META_GRAPH_VERSION", "v21.0")
+KAPSO_WEBHOOK_VERIFY_TOKEN = os.getenv("KAPSO_WEBHOOK_VERIFY_TOKEN", "")
+
+# --- Jira ---
+JIRA_URL = os.getenv("JIRA_URL", "https://botdr.atlassian.net")
+JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")
+JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
+JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY", "SCRUM")
+JIRA_ISSUE_TYPE_NAME = os.getenv("JIRA_ISSUE_TYPE_NAME", "Tarefa")

@@ -45,7 +45,7 @@ class KnowledgeBase:
     search via FAISS.
     """
 
-    EXCLUDED_DOCS = {"09-arquitetura-tecnica.md", "exemplo-documentacao.md"}
+    EXCLUDED_DOCS: set[str] = set()
 
     def __init__(self, base_dir: Path = KNOWLEDGE_BASE_DIR):
         self.base_dir = Path(base_dir)
@@ -242,9 +242,7 @@ class EmbeddingKnowledgeBase(KnowledgeBase):
             from sentence_transformers import SentenceTransformer
             import faiss  # noqa: F401
 
-            self._model = SentenceTransformer(
-                self._model_name, device=self._device
-            )
+            self._model = SentenceTransformer(self._model_name, device=self._device)
             self._embedding_dim = self._model.get_sentence_embedding_dimension()
             self._faiss_available = True
             logger.info(
@@ -401,12 +399,8 @@ class EmbeddingKnowledgeBase(KnowledgeBase):
                 str(self._index_cache_path / "embeddings.npy"),
                 self._embeddings,
             )
-            (self._index_cache_path / "meta.txt").write_text(
-                str(len(self._sections))
-            )
-            logger.info(
-                "faiss_index_cached", path=str(self._index_cache_path)
-            )
+            (self._index_cache_path / "meta.txt").write_text(str(len(self._sections)))
+            logger.info("faiss_index_cached", path=str(self._index_cache_path))
         except Exception as exc:
             logger.warning("faiss_cache_save_failed", error=str(exc))
 
@@ -421,9 +415,7 @@ class EmbeddingKnowledgeBase(KnowledgeBase):
         texts = self._section_texts()
         self._hybrid_retriever.build_sparse_index(texts)
 
-    def _dense_search_raw(
-        self, query: str, top_k: int
-    ) -> list[tuple[int, float]]:
+    def _dense_search_raw(self, query: str, top_k: int) -> list[tuple[int, float]]:
         """Run FAISS dense search and return raw (index, score) pairs.
 
         Used internally by the hybrid search pipeline. Returns a wider
@@ -434,9 +426,7 @@ class EmbeddingKnowledgeBase(KnowledgeBase):
             normalize_embeddings=True,
             show_progress_bar=False,
         )
-        query_vector = np.ascontiguousarray(
-            query_embedding, dtype=np.float32
-        )
+        query_vector = np.ascontiguousarray(query_embedding, dtype=np.float32)
 
         k = min(top_k, self._index.ntotal)
         scores, indices = self._index.search(query_vector, k)

@@ -34,8 +34,10 @@ WEIGHT_RETRIEVAL_COVERAGE = 0.25
 WEIGHT_KB_RELEVANCE = 0.25
 WEIGHT_LLM_COHERENCE = 0.15
 
-# Minimum cosine similarity to consider a retrieved section "relevant"
-RELEVANCE_FLOOR = 0.25
+# Minimum score to consider a retrieved section "relevant".
+# NOTE: When hybrid search (RRF) is active, scores are typically 0.01–0.06,
+# not cosine similarity (0.0–1.0). This threshold must work for both.
+RELEVANCE_FLOOR = 0.005
 
 
 @dataclass
@@ -83,6 +85,7 @@ class ConfidenceMetrics:
 # ---------------------------------------------------------------------------
 # Computation helpers
 # ---------------------------------------------------------------------------
+
 
 def _tokenize_simple(text: str) -> set[str]:
     """Lowercase alpha tokens of length >= 2."""
@@ -179,12 +182,17 @@ def should_override_decision(
         return "explain"
 
     if level == "low" and current_decision == "explain":
+        # Trust the LLM's decision if the KB returned ANY results.
+        # RRF scores are tiny (0.01–0.06) so "low confidence" is often a
+        # false alarm from the score scale mismatch, not missing coverage.
+        if metrics.retrieval_score > 0 and metrics.retrieval_coverage > 0:
+            return None
         logger.info(
             "confidence_override",
             from_decision="explain",
             to_decision="escalate",
             confidence=metrics.composite,
-            reason="low confidence — KB does not cover the topic",
+            reason="low confidence — KB returned zero relevant results",
         )
         return "escalate"
 

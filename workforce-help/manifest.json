@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.25/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.25",
+  "version": "1.1.0",
+  "id": "16d2b447-5a08-4ef1-9025-c48af8bd33a3",
+  "developer": {
+    "name": "Botsoma",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com/privacy",
+    "termsOfUseUrl": "https://example.com/terms"
+  },
+  "icons": {
+    "color": "icon-color.png",
+    "outline": "icon-outline.png"
+  },
+  "accentColor": "#234B59",
+  "name": {
+    "short": "Workforce Help",
+    "full": "Workforce Help"
+  },
+  "description": {
+    "short": "Bot de suporte com triagem automatica por IA",
+    "full": "Bot que analisa a mensagem do usuario, classifica como erro ou pergunta, explica topicos baseados na documentacao ou escala para um humano no Teams quando necessario."
+  },
+  "defaultInstallScope": "personal",
+  "bots": [
+    {
+      "botId": "b0ab8623-36a4-48d4-8b74-818941b0ae69",
+      "scopes": ["personal", "team", "groupChat"],
+      "isNotificationOnly": false,
+      "supportsFiles": false
+    }
+  ],
+  "supportsChannelFeatures": "tier1",
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": []
+}

@@ -215,6 +215,9 @@ def dict_to_session(data: dict) -> object:
         last_bot_question=data.get("last_bot_question", ""),
         in_follow_up=data.get("in_follow_up", False),
         frustration_tracker=frustration_tracker,
+        pending_classification=data.get("pending_classification", ""),
+        classification_confirmed=data.get("classification_confirmed", False),
+        channel=data.get("channel", "teams"),
     )
 
 

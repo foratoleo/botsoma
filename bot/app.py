@@ -20,6 +20,7 @@ from bot.config import (
     BOT_PORT,
     REDIS_URL,
     SUPPORT_USER_IDS,
+    KAPSO_WEBHOOK_VERIFY_TOKEN,
 )
 from bot.logging_config import setup_logging
 from bot.services.knowledge_base import get_knowledge_base
@@ -40,6 +41,9 @@ from bot.services.cards import (
     build_task_module_response,
     build_task_module_submit_response,
     build_welcome_card,
+    build_classify_card,
+    build_confirm_ticket_card,
+    build_ticket_created_card,
     card_to_activity,
     card_to_attachment,
 )
@@ -58,6 +62,7 @@ from bot.services.rate_limiter import (
     init_rate_limiter,
     RATE_LIMIT_MESSAGE,
 )
+from bot.adapters.channel_router import step_to_whatsapp
 
 setup_logging()
 logger = structlog.get_logger(__name__)
@@ -155,21 +160,83 @@ class TriageBot(ActivityHandler):
             )
 
             if step.decision == "ask":
-                await turn_context.send_activity(step.message)
+                card = build_ask_card(
+                    question=step.message,
+                    suggested_replies=step.suggested_actions,
+                    session_id=session.id,
+                )
+                reply = Activity(
+                    type=ActivityTypes.message,
+                    attachments=[card_to_attachment(card)],
+                    text=step.message,
+                )
+                await turn_context.send_activity(reply)
+
+            elif step.decision == "classify":
+                card = build_classify_card(
+                    message=step.message,
+                    classification_label=step.classification_label,
+                    session_id=session.id,
+                )
+                reply = Activity(
+                    type=ActivityTypes.message,
+                    attachments=[card_to_attachment(card)],
+                    text=step.message,
+                )
+                await turn_context.send_activity(reply)
+
+            elif step.decision == "confirm_ticket":
+                card = build_confirm_ticket_card(
+                    error_summary=step.error_summary or step.message,
+                    urgency=step.urgency or "normal",
+                    session_id=session.id,
+                )
+                reply = Activity(
+                    type=ActivityTypes.message,
+                    attachments=[card_to_attachment(card)],
+                    text=step.message,
+                )
+                await turn_context.send_activity(reply)
 
             elif step.decision == "explain":
-                reply = step.message
-                if step.sources:
-                    reply += f"\n\nFonte: {', '.join(step.sources)}"
+                card = build_explanation_card(
+                    explanation=step.message,
+                    sources=step.sources or None,
+                    session_id=session.id,
+                )
+                reply = Activity(
+                    type=ActivityTypes.message,
+                    attachments=[card_to_attachment(card)],
+                    text=step.message,
+                )
                 await turn_context.send_activity(reply)
 
             elif step.decision == "escalate":
-                session_closed()
-                error_msg = step.error_summary or step.reason
-                await turn_context.send_activity(
-                    f"Parece que voce esta enfrentando um problema tecnico: {error_msg}\n\n"
-                    "Vou encaminhar para o time de suporte."
-                )
+                if step.ticket_key:
+                    card = build_ticket_created_card(
+                        ticket_key=step.ticket_key,
+                        ticket_url=step.ticket_url,
+                        session_id=session.id,
+                    )
+                    reply = Activity(
+                        type=ActivityTypes.message,
+                        attachments=[card_to_attachment(card)],
+                        text=f"Chamado criado: {step.ticket_key}",
+                    )
+                    await turn_context.send_activity(reply)
+                else:
+                    session_closed()
+                    card = build_escalation_card(
+                        error_summary=step.error_summary or step.reason,
+                        urgency=step.urgency or "normal",
+                        session_id=session.id,
+                    )
+                    reply = Activity(
+                        type=ActivityTypes.message,
+                        attachments=[card_to_attachment(card)],
+                        text=f"Problema detectado: {step.error_summary or step.reason}",
+                    )
+                    await turn_context.send_activity(reply)
 
                 await self._send_escalation_notifications(
                     turn_context,
@@ -419,6 +486,81 @@ class TriageBot(ActivityHandler):
             )
             return self._invoke_ok(response_body)
 
+        # -- Classification confirmation (classify card buttons) --
+        if verb == "confirm_classification":
+            answer = data.get("answer", "sim")
+            session = await get_or_create_session(conversation_id)
+
+            if session.closed:
+                await reset_session(conversation_id)
+                session = await get_or_create_session(conversation_id)
+                session_opened()
+
+            if answer == "sim":
+                session.classification_confirmed = True
+                session.pending_classification = ""
+                from bot.services.triage_flow import save_session
+
+                await save_session(session)
+                synthetic = data.get("label", "duvida_uso")
+                log.info("classification_confirmed", label=synthetic)
+
+            card = build_welcome_card()
+            return self._invoke_ok(card)
+
+        # -- Create Jira ticket (confirm_ticket card button) --
+        if verb == "create_jira_ticket":
+            session = await get_or_create_session(conversation_id)
+            error_summary = data.get("error_summary", "Problema reportado pelo usuario")
+            urgency = data.get("urgency", "normal")
+
+            from bot.services.jira_service import create_ticket
+            from bot.services.triage_flow import save_session
+
+            ticket = await create_ticket(
+                summary=error_summary[:255],
+                description=session.history_as_text()
+                if hasattr(session, "history_as_text")
+                else error_summary,
+                urgency=urgency,
+                channel="teams",
+                conversation_id=conversation_id,
+            )
+
+            session.closed = True
+            session.add_bot(f"[ESCALACAO] Ticket {ticket.key} criado")
+            await save_session(session)
+
+            session_closed()
+            record_triage_decision("escalate", urgency)
+
+            if ticket.success:
+                card = build_ticket_created_card(
+                    ticket_key=ticket.key,
+                    ticket_url=ticket.url,
+                    session_id=session.id,
+                )
+            else:
+                card = build_escalation_card(
+                    error_summary=f"Nao consegui criar o chamado: {ticket.error}",
+                    urgency=urgency,
+                    session_id=session.id,
+                )
+            return self._invoke_ok(card)
+
+        # -- Decline Jira ticket --
+        if verb == "decline_jira_ticket":
+            session = await get_or_create_session(conversation_id)
+            if session.pending_classification == "awaiting_ticket_confirm":
+                session.pending_classification = ""
+                session.classification_confirmed = True
+                from bot.services.triage_flow import save_session
+
+                await save_session(session)
+
+            card = build_welcome_card()
+            return self._invoke_ok(card)
+
         log.warning("unrecognized_verb", verb=verb)
         return self._invoke_ok()
 
@@ -485,6 +627,20 @@ class TriageBot(ActivityHandler):
 
     def _step_to_card(self, step: TriageStep, session_id: str) -> dict:
         """Convert a TriageStep into the appropriate Adaptive Card dict."""
+        if step.decision == "classify":
+            return build_classify_card(
+                message=step.message,
+                classification_label=step.classification_label,
+                session_id=session_id,
+            )
+
+        if step.decision == "confirm_ticket":
+            return build_confirm_ticket_card(
+                error_summary=step.error_summary or step.message,
+                urgency=step.urgency or "normal",
+                session_id=session_id,
+            )
+
         if step.decision == "ask":
             return build_ask_card(
                 question=step.message,
@@ -496,6 +652,13 @@ class TriageBot(ActivityHandler):
             return build_explanation_card(
                 explanation=step.message,
                 sources=step.sources or None,
+                session_id=session_id,
+            )
+
+        if step.decision == "escalate" and step.ticket_key:
+            return build_ticket_created_card(
+                ticket_key=step.ticket_key,
+                ticket_url=step.ticket_url,
                 session_id=session_id,
             )
 
@@ -600,6 +763,109 @@ app = web.Application()
 app.router.add_post("/api/messages", messages)
 app.router.add_get("/metrics", metrics_handler)
 app.router.add_get("/health", health_handler)
+
+
+async def whatsapp_webhook_verify(req):
+    """WhatsApp webhook verification (GET). Meta sends hub.challenge."""
+    mode = req.query.get("hub.mode", "")
+    token = req.query.get("hub.verify_token", "")
+    challenge = req.query.get("hub.challenge", "")
+
+    if mode == "subscribe" and token == KAPSO_WEBHOOK_VERIFY_TOKEN:
+        logger.info("whatsapp_webhook_verified")
+        return web.Response(text=challenge, status=200)
+
+    logger.warning("whatsapp_webhook_verify_failed", mode=mode)
+    return web.Response(status=403)
+
+
+async def whatsapp_webhook_receive(req):
+    """WhatsApp webhook receiver (POST). Processes incoming messages from Kapso."""
+    try:
+        body = await req.json()
+    except Exception:
+        return web.Response(status=400)
+
+    logger.info(
+        "whatsapp_webhook_received",
+        body_keys=list(body.keys()) if isinstance(body, dict) else "non-dict",
+    )
+
+    try:
+        entry = body.get("entry", [])
+        for e in entry:
+            changes = e.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                for msg in messages:
+                    await _process_whatsapp_message(msg)
+    except Exception as exc:
+        logger.error("whatsapp_webhook_error", error=str(exc))
+
+    return web.Response(status=200)
+
+
+async def _process_whatsapp_message(msg: dict):
+    """Process a single WhatsApp inbound message through the triage flow."""
+    wa_id = msg.get("from", "")
+    msg_type = msg.get("type", "text")
+    msg_id = msg.get("id", "")
+
+    if not wa_id:
+        return
+
+    if msg_type == "text":
+        user_text = msg.get("text", {}).get("body", "").strip()
+    elif msg_type == "interactive":
+        interactive = msg.get("interactive", {})
+        button_reply = interactive.get("button_reply", {})
+        user_text = button_reply.get("id", "") or button_reply.get("title", "")
+        if not user_text:
+            list_reply = interactive.get("list_reply", {})
+            user_text = list_reply.get("id", "") or list_reply.get("title", "")
+    elif msg_type == "button":
+        user_text = msg.get("button", {}).get("text", "")
+    else:
+        user_text = ""
+
+    if not user_text:
+        return
+
+    BUTTON_ID_MAP = {
+        "confirm_sim": "sim",
+        "confirm_nao": "nao",
+        "ticket_sim": "sim",
+        "ticket_nao": "nao",
+    }
+    user_text = BUTTON_ID_MAP.get(user_text, user_text)
+
+    log = logger.bind(wa_id=wa_id, msg_id=msg_id)
+    log.info("whatsapp_message_processing", text_preview=user_text[:80])
+
+    session = await get_or_create_session(f"wa:{wa_id}")
+    session.channel = "whatsapp"
+
+    if session.closed:
+        await reset_session(f"wa:{wa_id}")
+        session = await get_or_create_session(f"wa:{wa_id}")
+        session.channel = "whatsapp"
+
+    try:
+        step: TriageStep = await process_turn(session, user_text)
+        log.info("whatsapp_triage_decision", decision=step.decision)
+        await step_to_whatsapp(step, wa_id)
+    except Exception as exc:
+        log.error("whatsapp_triage_error", error=str(exc))
+        from bot.adapters.whatsapp_adapter import send_text as wa_send_text
+
+        await wa_send_text(
+            wa_id, "Nao consegui processar sua mensagem. Por favor, tente novamente."
+        )
+
+
+app.router.add_get("/api/whatsapp/webhook", whatsapp_webhook_verify)
+app.router.add_post("/api/whatsapp/webhook", whatsapp_webhook_receive)
 
 
 async def on_startup(_app: web.Application) -> None:
