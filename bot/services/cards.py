@@ -24,13 +24,15 @@ from typing import Any
 
 import structlog
 
+from botbuilder.schema import Attachment
+
 logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-CARD_SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
+CARD_SCHEMA = "https://adaptivecards.io/schemas/adaptive-card.json"
 CARD_VERSION = "1.4"
 
 
@@ -84,12 +86,12 @@ def _text_block(text: str, **kwargs: Any) -> dict[str, Any]:
     return block
 
 
-def card_to_attachment(card: dict[str, Any]) -> dict[str, Any]:
-    """Wrap an Adaptive Card dict into a Bot Framework attachment object."""
-    return {
-        "contentType": "application/vnd.microsoft.card.adaptive",
-        "content": card,
-    }
+def card_to_attachment(card: dict[str, Any]) -> Attachment:
+    """Wrap an Adaptive Card dict into a Bot Framework Attachment object."""
+    return Attachment(
+        content_type="application/vnd.microsoft.card.adaptive",
+        content=card,
+    )
 
 
 def card_to_activity(card: dict[str, Any], fallback_text: str = "") -> dict[str, Any]:
