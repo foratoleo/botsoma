@@ -189,6 +189,7 @@ class TriageBot(ActivityHandler):
                     type=ActivityTypes.message,
                     attachments=[card_to_attachment(card)],
                     text=step.message,
+                    summary=step.message[:80],
                 )
                 _log_outbound(reply, log)
                 await turn_context.send_activity(reply)
@@ -203,6 +204,7 @@ class TriageBot(ActivityHandler):
                     type=ActivityTypes.message,
                     attachments=[card_to_attachment(card)],
                     text=step.message,
+                    summary=f"Classificacao: {step.classification_label or step.message[:60]}",
                 )
                 _log_outbound(reply, log)
                 await turn_context.send_activity(reply)
@@ -217,6 +219,7 @@ class TriageBot(ActivityHandler):
                     type=ActivityTypes.message,
                     attachments=[card_to_attachment(card)],
                     text=step.message,
+                    summary=f"Abrir chamado: {(step.error_summary or step.message)[:60]}",
                 )
                 _log_outbound(reply, log)
                 await turn_context.send_activity(reply)
@@ -231,6 +234,7 @@ class TriageBot(ActivityHandler):
                     type=ActivityTypes.message,
                     attachments=[card_to_attachment(card)],
                     text=step.message,
+                    summary=step.message[:80],
                 )
                 _log_outbound(reply, log)
                 await turn_context.send_activity(reply)
@@ -246,6 +250,7 @@ class TriageBot(ActivityHandler):
                         type=ActivityTypes.message,
                         attachments=[card_to_attachment(card)],
                         text=f"Chamado criado: {step.ticket_key}",
+                        summary=f"Chamado criado: {step.ticket_key}",
                     )
                     _log_outbound(reply, log)
                     await turn_context.send_activity(reply)
@@ -260,6 +265,7 @@ class TriageBot(ActivityHandler):
                         type=ActivityTypes.message,
                         attachments=[card_to_attachment(card)],
                         text=f"Problema detectado: {step.error_summary or step.reason}",
+                        summary=f"Escalacao: {(step.error_summary or step.reason)[:60]}",
                     )
                     _log_outbound(reply, log)
                     await turn_context.send_activity(reply)
@@ -773,11 +779,13 @@ class TriageBot(ActivityHandler):
         if result and result.body and isinstance(result.body, dict):
             card = result.body.get("value")
             if card and isinstance(card, dict):
+                fallback = card.get("fallbackText", "")
                 await turn_context.send_activity(
                     Activity(
                         type=ActivityTypes.message,
                         attachments=[card_to_attachment(card)],
-                        text=card.get("fallbackText", ""),
+                        text=fallback,
+                        summary=fallback[:80] if fallback else "Acao processada",
                     )
                 )
 
@@ -839,6 +847,7 @@ class TriageBot(ActivityHandler):
                     type=ActivityTypes.message,
                     attachments=[card_to_attachment(welcome_card)],
                     text=WELCOME_MESSAGE,
+                    summary="Workforce Help - Assistente de suporte",
                 )
                 await turn_context.send_activity(welcome_activity)
 
@@ -884,7 +893,7 @@ async def test_card_handler(req):
     minimal_card = {
         "$schema": "https://adaptivecards.io/schemas/adaptive-card.json",
         "type": "AdaptiveCard",
-        "version": "1.4",
+        "version": "1.3",
         "body": [
             {
                 "type": "TextBlock",
