@@ -1,8 +1,8 @@
 """
 Adaptive Cards service for interactive UX in Microsoft Teams.
 
-Builds card JSON payloads following the Adaptive Cards schema v1.5 with
-Universal Action Model (Action.Execute) for bot-initiated actions.
+Builds card JSON payloads following the Adaptive Cards schema v1.3 with
+Action.Submit for broad Teams client compatibility.
 
 All cards include ``fallbackText`` so that clients without Adaptive Card
 support still receive a meaningful plain-text message.

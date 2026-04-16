@@ -517,16 +517,12 @@ class TriageBot(ActivityHandler):
             card = self._step_to_card(step, session.id)
             return self._invoke_card(card)
 
-        # -- Report problem (opens task module) --
+        # -- Report problem (shows inline form card) --
+        # NOTE: Action.Submit cannot open Task Modules. Instead, we refresh
+        # the current card with the problem form directly.
         if verb == "report_problem":
             form_card = build_problem_form_card()
-            response_body = build_task_module_response(
-                form_card,
-                title="Reportar Problema",
-                width="medium",
-                height="large",
-            )
-            return self._invoke_ok(response_body)
+            return self._invoke_card(form_card)
 
         # -- Classification confirmation (classify card buttons) --
         if verb == "confirm_classification":
@@ -631,6 +627,58 @@ class TriageBot(ActivityHandler):
                 await save_session(session)
 
             card = build_welcome_card()
+            return self._invoke_card(card)
+
+        # -- Submit problem form --
+        if verb == "submit_problem":
+            from bot.services.cards import process_problem_submission
+
+            submission = process_problem_submission(data)
+            if not submission.is_valid:
+                log.warning(
+                    "problem_submission_invalid", errors=submission.validation_errors
+                )
+                form_card = build_problem_form_card()
+                return self._invoke_card(form_card)
+
+            session = await get_or_create_session(conversation_id)
+            if session.closed:
+                await reset_session(conversation_id)
+                session = await get_or_create_session(conversation_id)
+                session_opened()
+
+            triage_text = submission.to_triage_text()
+
+            async with track_triage_latency():
+                t0 = time.monotonic()
+                step = await process_turn(session, triage_text)
+                latency_ms = round((time.monotonic() - t0) * 1000, 1)
+
+            record_triage_decision(step.decision, step.urgency or submission.urgency)
+            log.info(
+                "triage_decision",
+                session_id=session.id,
+                decision=step.decision,
+                latency_ms=latency_ms,
+                source="submit_problem",
+                category=submission.category,
+                urgency=submission.urgency,
+            )
+
+            if step.decision == "escalate":
+                await self._send_escalation_notifications(
+                    turn_context,
+                    user_name,
+                    timestamp,
+                    conversation_id,
+                    submission.urgency,
+                    step.error_summary or submission.description,
+                    session,
+                    service_url,
+                    log,
+                )
+
+            card = self._step_to_card(step, session.id)
             return self._invoke_card(card)
 
         log.warning("unrecognized_verb", verb=verb)
