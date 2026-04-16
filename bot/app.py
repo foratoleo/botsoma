@@ -10,7 +10,7 @@ from botbuilder.core import (
     TurnContext,
     ActivityHandler,
 )
-from botbuilder.schema import Activity, ActivityTypes
+from botbuilder.schema import Activity, ActivityTypes, Attachment
 from aiohttp import web
 
 from bot.config import (
@@ -84,6 +84,20 @@ async def on_error(context: TurnContext, error: Exception):
 
 
 adapter.on_turn_error = on_error
+
+
+def _log_outbound(activity: Activity, log) -> None:
+    try:
+        serialized = activity.serialize()
+        log.info(
+            "outbound_payload",
+            has_attachments=bool(serialized.get("attachments")),
+            attachment_count=len(serialized.get("attachments", [])),
+            text_preview=(serialized.get("text") or "")[:80],
+        )
+    except Exception as exc:
+        log.error("outbound_serialize_error", error=str(exc))
+
 
 WELCOME_MESSAGE = (
     "Ola! Sou o **Workforce Help**.\n\n"
@@ -176,6 +190,7 @@ class TriageBot(ActivityHandler):
                     attachments=[card_to_attachment(card)],
                     text=step.message,
                 )
+                _log_outbound(reply, log)
                 await turn_context.send_activity(reply)
 
             elif step.decision == "classify":
@@ -189,6 +204,7 @@ class TriageBot(ActivityHandler):
                     attachments=[card_to_attachment(card)],
                     text=step.message,
                 )
+                _log_outbound(reply, log)
                 await turn_context.send_activity(reply)
 
             elif step.decision == "confirm_ticket":
@@ -202,6 +218,7 @@ class TriageBot(ActivityHandler):
                     attachments=[card_to_attachment(card)],
                     text=step.message,
                 )
+                _log_outbound(reply, log)
                 await turn_context.send_activity(reply)
 
             elif step.decision == "explain":
@@ -215,6 +232,7 @@ class TriageBot(ActivityHandler):
                     attachments=[card_to_attachment(card)],
                     text=step.message,
                 )
+                _log_outbound(reply, log)
                 await turn_context.send_activity(reply)
 
             elif step.decision == "escalate":
@@ -229,6 +247,7 @@ class TriageBot(ActivityHandler):
                         attachments=[card_to_attachment(card)],
                         text=f"Chamado criado: {step.ticket_key}",
                     )
+                    _log_outbound(reply, log)
                     await turn_context.send_activity(reply)
                 else:
                     session_closed()
@@ -242,6 +261,7 @@ class TriageBot(ActivityHandler):
                         attachments=[card_to_attachment(card)],
                         text=f"Problema detectado: {step.error_summary or step.reason}",
                     )
+                    _log_outbound(reply, log)
                     await turn_context.send_activity(reply)
 
                 await self._send_escalation_notifications(
@@ -851,10 +871,58 @@ async def messages(req):
         return web.Response(status=500)
 
 
+async def test_card_handler(req):
+    """Smoke-test endpoint that returns a minimal Adaptive Card as JSON.
+
+    GET /api/test-card  →  {"activity": <serialized Activity JSON>}
+
+    Use this to verify that:
+    1. ``card_to_attachment()`` produces a valid Attachment object.
+    2. ``Activity.serialize()`` succeeds without SerializationError.
+    3. The serialized JSON has the correct structure for Teams.
+    """
+    minimal_card = {
+        "$schema": "https://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+            {
+                "type": "TextBlock",
+                "text": "Smoke test — se voce ve este card, o Adaptive Card esta funcionando!",
+                "wrap": True,
+                "size": "Medium",
+                "weight": "Bolder",
+                "color": "Good",
+            }
+        ],
+        "fallbackText": "Smoke test OK (fallback)",
+    }
+
+    attachment = Attachment(
+        content_type="application/vnd.microsoft.card.adaptive",
+        content=minimal_card,
+    )
+
+    activity = Activity(
+        type=ActivityTypes.message,
+        text="Smoke test — card should be visible",
+        attachments=[attachment],
+    )
+
+    try:
+        serialized = activity.serialize()
+        logger.info("test_card_serialized", json_keys=list(serialized.keys()))
+        return web.json_response({"status": "ok", "activity": serialized})
+    except Exception as exc:
+        logger.error("test_card_serialize_error", error=str(exc), exc_info=True)
+        return web.json_response({"status": "error", "error": str(exc)}, status=500)
+
+
 app = web.Application()
 app.router.add_post("/api/messages", messages)
 app.router.add_get("/metrics", metrics_handler)
 app.router.add_get("/health", health_handler)
+app.router.add_get("/api/test-card", test_card_handler)
 
 
 async def whatsapp_webhook_verify(req):
