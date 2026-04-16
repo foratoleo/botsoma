@@ -33,7 +33,7 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 CARD_SCHEMA = "https://adaptivecards.io/schemas/adaptive-card.json"
-CARD_VERSION = "1.4"
+CARD_VERSION = "1.3"
 
 
 # ---------------------------------------------------------------------------
